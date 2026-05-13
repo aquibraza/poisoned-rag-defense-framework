@@ -1,0 +1,19 @@
+{
+    "model_info":{
+        "provider":"vicuna",
+        "name":"lmsys/vicuna-7b-v1.5"
+    },
+    "api_key_info":{
+        "api_keys":[
+            "YOUR_HUGGINGFACE_TOKEN_HERE"
+        ],
+        "api_key_use": 0
+    },
+    "params":{
+        "temperature":0.1,
+        "seed":100,
+        "gpus":[0],
+        "device":"cuda",
+        "max_output_tokens":150
+    }
+}

@@ -1,19 +1,18 @@
 {
     "model_info":{
-        "provider":"llama",
-        "name":"meta-llama/Llama-2-13b-chat-hf"
+        "provider":"gpt",
+        "name":"gpt-3.5-turbo"
     },
     "api_key_info":{
         "api_keys":[
-            "Your huggingface token here"
+            "YOUR_OPENAI_API_KEY_HERE"
         ],
         "api_key_use": 0
     },
     "params":{
         "temperature":0.1,
         "seed":100,
-        "gpus":[0],
-        "device":"cuda",
+        "gpus":[],
         "max_output_tokens":150
     }
 }

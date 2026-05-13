@@ -161,3 +161,25 @@ cython_debug/
 
 datasets
 logs
+
+# Virtual environments
+PoisonedRAG_env/
+venv/
+.venv/
+
+# API keys and model configs with credentials (use *.template.json for sharing configs)
+model_configs/*.json
+!model_configs/*.template.json
+
+# Large result/data files
+*.zip
+results/beir_results/
+results/adv_targeted_results/
+
+# Cursor workspace/project files
+.cursor/
+*.code-workspace
+.DS_Store
+
+# RAGDefender submodule artifacts
+RAGDefender/artifacts/

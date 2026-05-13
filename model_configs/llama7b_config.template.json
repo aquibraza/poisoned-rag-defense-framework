@@ -5,7 +5,7 @@
     },
     "api_key_info":{
         "api_keys":[
-            "Your huggingface token here"
+            "YOUR_HUGGINGFACE_TOKEN_HERE"
         ],
         "api_key_use": 0
     },
@@ -13,7 +13,7 @@
         "temperature":0.1,
         "seed":100,
         "gpus":[0],
-        "device":"cuda",
+        "device":"cpu",
         "max_output_tokens":150
     }
 }
