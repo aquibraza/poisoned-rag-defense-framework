@@ -230,6 +230,15 @@ Located in `defense/defense_runner.py`, RAGDefender detects and removes poisoned
 3. **Remove** the highest-scoring (most suspicious) documents
 4. **Prompt** the LLM with the cleaned context
 
+The default experiments above use `k=5` retrieved passages with `N=5`
+injected adversarial passages — i.e. a **100%-poisoned retrieved context**,
+which is a deliberate stress test rather than RAGDefender's assumed
+operating point. See [`docs/RAGDEFENDER_DIAGNOSTIC_PLAN.md`](docs/RAGDEFENDER_DIAGNOSTIC_PLAN.md)
+for a diagnostic evaluation (poison-labeled passage diagnostics, a `k`-sweep
+past `N`, and oracle/random diagnostic controls) that investigates whether
+RAGDefender's inconsistent results come from this saturation, an
+implementation issue, or an evaluation issue.
+
 ---
 
 ## Supported Models
