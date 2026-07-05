@@ -186,6 +186,11 @@ def main():
     log_diagnostics = args.log_diagnostics == 'True'
     dry_run = args.dry_run == 'True'
     diagnostics_path = default_diagnostics_path(args.name, base_dir=args.diagnostics_dir)
+    if log_diagnostics and os.path.exists(diagnostics_path):
+        # append_jsonl() appends; without this, re-running the same --name
+        # (e.g. after a bugfix, or to add more queries) would silently mix
+        # stale records from the previous run into this run's diagnostics.
+        os.remove(diagnostics_path)
     processed_queries = 0
     limit_reached = False
 
@@ -312,6 +317,7 @@ def main():
                         gpu_id=args.gpu_id,
                         top_k=args.top_k,
                         seed=args.random_removal_seed,
+                        query_id=incorrect_answers[i]['id'],
                     )
                 latency_defense_sec = _dt["elapsed_sec"]
                 topk_contents = passage_texts(kept_passages)

@@ -8,7 +8,11 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from defense.controls import oracle_remove_all_poison, random_remove_same_count
+from defense.controls import (
+    oracle_remove_all_poison,
+    random_remove_same_count,
+    stable_seed_for_query,
+)
 from defense.passages import count_poison_clean, doc_ids, label_passages
 
 
@@ -85,6 +89,70 @@ class TestRandomRemoveSameCount(unittest.TestCase):
         _, diag = random_remove_same_count(passages, n_to_remove=2, seed=3)
         self.assertIn("diagnostic control", diag["notes"])
         self.assertIn("not a deployable defense", diag["notes"])
+
+    def test_without_query_id_seed_is_used_directly_same_indices_every_call(self):
+        """Backward-compat / base-case behavior: with no query_id, the same
+        (seed, n, len(passages)) always removes the same relative indices --
+        this is exactly the behavior that made the baseline non-random
+        *across queries* when every call used the same bare seed."""
+        passages = make_mixed_passages(n_clean=6, n_poison=3)
+        kept1, _ = random_remove_same_count(passages, n_to_remove=4, seed=12)
+        kept2, _ = random_remove_same_count(passages, n_to_remove=4, seed=12)
+        self.assertEqual(doc_ids(kept1), doc_ids(kept2))
+
+    def test_query_id_varies_removal_across_queries_with_same_base_seed(self):
+        """The actual fix: same base seed, same passage layout, different
+        query_id -> different removed set (overwhelmingly likely), so the
+        random control no longer removes the same relative positions for
+        every query in a run."""
+        passages = make_mixed_passages(n_clean=6, n_poison=3)
+        kept_q1, _ = random_remove_same_count(
+            passages, n_to_remove=4, seed=12, query_id="query-1"
+        )
+        kept_q2, _ = random_remove_same_count(
+            passages, n_to_remove=4, seed=12, query_id="query-2"
+        )
+        self.assertNotEqual(doc_ids(kept_q1), doc_ids(kept_q2))
+
+    def test_query_id_removal_is_reproducible(self):
+        """Same (base_seed, query_id) always yields the same removal --
+        the run stays fully reproducible from base_seed alone."""
+        passages = make_mixed_passages(n_clean=6, n_poison=3)
+        kept_a, _ = random_remove_same_count(
+            passages, n_to_remove=4, seed=12, query_id="query-1"
+        )
+        kept_b, _ = random_remove_same_count(
+            passages, n_to_remove=4, seed=12, query_id="query-1"
+        )
+        self.assertEqual(doc_ids(kept_a), doc_ids(kept_b))
+
+    def test_notes_include_query_id_and_effective_seed(self):
+        passages = make_mixed_passages(n_clean=3, n_poison=2)
+        _, diag = random_remove_same_count(
+            passages, n_to_remove=2, seed=3, query_id="abc123"
+        )
+        self.assertIn("abc123", diag["notes"])
+        self.assertIn("base_seed=3", diag["notes"])
+
+
+class TestStableSeedForQuery(unittest.TestCase):
+    def test_deterministic(self):
+        self.assertEqual(
+            stable_seed_for_query(12, "q1"), stable_seed_for_query(12, "q1")
+        )
+
+    def test_varies_by_query_id(self):
+        self.assertNotEqual(
+            stable_seed_for_query(12, "q1"), stable_seed_for_query(12, "q2")
+        )
+
+    def test_varies_by_base_seed(self):
+        self.assertNotEqual(
+            stable_seed_for_query(12, "q1"), stable_seed_for_query(99, "q1")
+        )
+
+    def test_returns_int(self):
+        self.assertIsInstance(stable_seed_for_query(12, "q1"), int)
 
 
 if __name__ == "__main__":

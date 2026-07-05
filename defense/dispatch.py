@@ -129,12 +129,18 @@ def run_defense(
     gpu_id: int = 0,
     top_k: Optional[int] = None,
     seed: int = 12,
+    query_id: Optional[str] = None,
 ) -> Tuple[List[RetrievedPassage], Dict]:
     """Apply `defense_name` to `passages` and return (kept_passages, diag_extra).
 
     `diag_extra` always contains at least `N_adv_estimated_by_ragdefender`
     (may be None) and `notes` (may be an empty string); individual defenses
     may add more keys.
+
+    `query_id`, when provided, is used by `random_remove_same_count` to
+    derive a per-query effective seed (`stable_seed_for_query`) so the
+    random-removal baseline draws an independent sample per query instead of
+    repeating the same relative removal pattern across every query in a run.
     """
     name = (defense_name or "none").lower()
 
@@ -153,7 +159,9 @@ def run_defense(
         n_estimate = estimate_num_adversarial(
             [p.text for p in passages], dataset, device=device, gpu_id=gpu_id
         )
-        return random_remove_same_count(passages, n_to_remove=n_estimate, seed=seed)
+        return random_remove_same_count(
+            passages, n_to_remove=n_estimate, seed=seed, query_id=query_id
+        )
 
     raise ValueError(
         f"Unknown defense {defense_name!r}; expected one of {DEFENSE_CHOICES}"

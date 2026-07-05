@@ -136,6 +136,25 @@ class TestOracleAndRandomThroughDispatch(DispatchSmokeTestBase):
         n_estimate = diag["N_adv_estimated_by_ragdefender"]
         self.assertEqual(len(kept), len(passages) - n_estimate)
 
+    def test_random_removal_varies_by_query_id_with_same_base_seed(self):
+        """Regression test: previously every query in a run passed the same
+        bare seed to random_remove_same_count, so with a stable passage
+        ordering (poison-before-clean from score sorting) the SAME relative
+        positions were removed for every query. run_defense must now thread
+        query_id through so different queries get different draws."""
+        passages = label_passages(make_raw_hotpotqa_like(n_clean=4, n_poison=4))
+        kept_q1, _ = dispatch.run_defense(
+            "random_remove_same_count", "Who was born first?", passages, "hotpotqa",
+            device="cpu", seed=12, query_id="query-1",
+        )
+        kept_q2, _ = dispatch.run_defense(
+            "random_remove_same_count", "Who was born first?", passages, "hotpotqa",
+            device="cpu", seed=12, query_id="query-2",
+        )
+        doc_ids_q1 = sorted(p.doc_id for p in kept_q1)
+        doc_ids_q2 = sorted(p.doc_id for p in kept_q2)
+        self.assertNotEqual(doc_ids_q1, doc_ids_q2)
+
 
 class TestUnknownDefenseRaises(unittest.TestCase):
     def test_unknown_defense_name_raises(self):
