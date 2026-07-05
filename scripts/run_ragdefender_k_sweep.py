@@ -79,6 +79,7 @@ def build_command(
     live_generation: bool,
     seed: int,
     random_removal_seed: int,
+    model_config_path: str = None,
 ):
     name = build_run_name(dataset, k, N, defense, max_queries)
     cmd = [
@@ -107,6 +108,12 @@ def build_command(
         "--dry_run", "False" if live_generation else "True",
         "--name", name,
     ]
+    # main.py already supports --model_config_path (defaults to
+    # model_configs/{model_name}_config.json when omitted); this just
+    # exposes an explicit override at the sweep-script level rather than
+    # relying on that model_name-derived default.
+    if model_config_path:
+        cmd += ["--model_config_path", model_config_path]
     return cmd, name
 
 
@@ -125,6 +132,14 @@ def parse_args():
         "--defenses", nargs="+", default=["none", "ragdefender_original"], choices=ALL_DEFENSE_CHOICES,
     )
     parser.add_argument("--model_name", default="gpt4")
+    parser.add_argument(
+        "--model_config_path", default=None,
+        help=(
+            "Explicit path to a model config JSON (e.g. model_configs/gpt4_config.json). "
+            "Passed straight through to main.py's own --model_config_path. If omitted, "
+            "main.py falls back to its default: model_configs/{model_name}_config.json."
+        ),
+    )
     parser.add_argument(
         "--query_results_dir", default="ragdefender_k_sweep",
         help="Subdirectory of results/query_results/ for this sweep's result JSON files.",
@@ -196,6 +211,7 @@ def main():
                     live_generation=live_generation,
                     seed=args.seed,
                     random_removal_seed=args.random_removal_seed,
+                    model_config_path=args.model_config_path,
                 )
                 commands.append((cmd, name))
 
