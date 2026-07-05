@@ -1,0 +1,9 @@
+dataset,model,defense,k,N_injected,n_queries,ASR_no_defense,ASR_with_defense,ASR_delta,mean_N_retrieved_poison,mean_N_retrieved_clean,mean_N_adv_estimated,mean_removed_poison,mean_removed_clean,mean_poison_recall,mean_clean_false_positive_rate,mean_residual_poison_fraction,mean_latency_defense_sec
+hotpotqa,gpt4,none,5,5,10,,,,5,0,,0,0,0.0,,1.0,5.916699999986008e-06
+hotpotqa,gpt4,oracle_remove_all_poison,5,5,10,,,,5,0,5,5,0,1.0,,,1.0875099998486349e-05
+hotpotqa,gpt4,ragdefender_original,5,5,10,,,,5,0,2.8,2.8,0,0.56,,1.0,0.08229782080000021
+hotpotqa,gpt4,random_remove_same_count,5,5,10,,,,5,0,2.8,2.8,0,0.56,,1.0,0.051056587400000096
+hotpotqa,gpt4,none,10,5,10,,,,5,5,,0,0,0.0,0.0,0.5,5.441699999408911e-06
+hotpotqa,gpt4,oracle_remove_all_poison,10,5,10,,,,5,5,5,5,0,1.0,0.0,0.0,9.225000000512296e-06
+hotpotqa,gpt4,ragdefender_original,10,5,10,,,,5,5,5.4,4.4,1,0.88,0.2,0.0880952380952381,0.18089810839999956
+hotpotqa,gpt4,random_remove_same_count,10,5,10,,,,5,5,5.4,3.4,2,0.68,0.4,0.31214285714285717,0.07736352100000018
