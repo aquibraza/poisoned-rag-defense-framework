@@ -97,6 +97,39 @@ class TestAggregate(unittest.TestCase):
         self.assertIsNone(s["ASR_with_defense"])
         self.assertIsNone(s["ASR_delta"])
 
+    def test_asr_strict_means_and_delta_computed_when_present(self):
+        records = [
+            make_record(
+                query_id="q1", defense="ragdefender_original",
+                asr_no_defense=True, asr_with_defense=True,  # legacy false positive
+                asr_no_defense_strict=True, asr_with_defense_strict=False,  # strict correctly flips
+            ),
+            make_record(
+                query_id="q2", defense="ragdefender_original",
+                asr_no_defense=True, asr_with_defense=True,
+                asr_no_defense_strict=True, asr_with_defense_strict=True,
+            ),
+        ]
+        summaries = summarizer.aggregate(records)
+        s = summaries[0]
+        # Legacy aggregate unaffected (both records report with_defense=True).
+        self.assertAlmostEqual(s["ASR_with_defense"], 1.0)
+        # Strict aggregate correctly shows the defense worked on q1.
+        self.assertAlmostEqual(s["ASR_with_defense_strict"], 0.5)
+        self.assertAlmostEqual(s["ASR_delta_strict"], 0.5 - 1.0)
+
+    def test_asr_strict_absent_on_older_records_degrades_to_none(self):
+        """Records written before the strict-ASR fix lack asr_*_strict
+        fields entirely; aggregate() must not KeyError and should report
+        None (not crash) for the strict columns."""
+        records = [make_record(query_id="q1", defense="ragdefender_original", asr_with_defense=True)]
+        for r in records:
+            r.pop("asr_no_defense_strict", None)
+            r.pop("asr_with_defense_strict", None)
+        summaries = summarizer.aggregate(records)
+        self.assertIsNone(summaries[0]["ASR_with_defense_strict"])
+        self.assertIsNone(summaries[0]["ASR_delta_strict"])
+
     def test_mean_ignores_none_values(self):
         records = [
             make_record(query_id="q1", clean_false_positive_rate=0.5),
@@ -149,6 +182,20 @@ class TestReportRendering(unittest.TestCase):
         self.assertIn("Worst 10 queries", report)
         self.assertIn("removed more clean than poisoned", report)
         self.assertIn("RAGDefender vs. oracle vs. random removal", report)
+
+    def test_report_distinguishes_legacy_and_strict_asr(self):
+        records = [
+            make_record(
+                query_id="q1", defense="ragdefender_original", k=5,
+                asr_no_defense=True, asr_with_defense=True,
+                asr_no_defense_strict=True, asr_with_defense_strict=False,
+            ),
+        ]
+        summaries = summarizer.aggregate(records)
+        report = summarizer.render_report(summaries, records)
+        self.assertIn("ASR_with_defense (legacy)", report)
+        self.assertIn("ASR_with_defense (strict)", report)
+        self.assertIn("substring-match ASR", report)
 
     def test_decision_tree_flags_improvement_at_higher_k(self):
         records = [

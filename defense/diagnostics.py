@@ -21,6 +21,7 @@ import time
 from contextlib import contextmanager
 from typing import Dict, List, Optional, Sequence
 
+from defense.asr_match import legacy_match, strict_match
 from defense.passages import RetrievedPassage, count_poison_clean, doc_ids, poison_flags, removed_passages
 
 # Canonical schema -- keep in sync with docs/RAGDEFENDER_DIAGNOSTIC_PLAN.md.
@@ -52,6 +53,23 @@ DIAGNOSTIC_FIELDS = (
     "gold_answer",
     "asr_no_defense",
     "asr_with_defense",
+    # asr_no_defense/asr_with_defense above are the *legacy* substring-match
+    # ASR flags computed by the caller (main.py), preserved byte-for-byte
+    # for backward compatibility. The four fields below are computed
+    # internally by build_diagnostic_record() from
+    # answer_{no_defense,with_defense}/target_wrong_answer using
+    # defense/asr_match.py: *_legacy re-derives the same substring check
+    # (should always agree with asr_no_defense/asr_with_defense above) and
+    # *_strict uses strict token-boundary ASR instead (a standalone
+    # yes/no token, or an exact token-subsequence match -- not a semantic
+    # yes/no evaluator; see defense/asr_match.py module docstring for its
+    # negation-detection limitation and for why legacy substring matching
+    # can false-positive, e.g. target "no" matching inside "does NOt
+    # provide...").
+    "asr_no_defense_legacy",
+    "asr_with_defense_legacy",
+    "asr_no_defense_strict",
+    "asr_with_defense_strict",
     "latency_retrieval_sec",
     "latency_defense_sec",
     "latency_generation_sec",
@@ -66,6 +84,10 @@ GENERATION_DEPENDENT_FIELDS = (
     "gold_answer",
     "asr_no_defense",
     "asr_with_defense",
+    "asr_no_defense_legacy",
+    "asr_with_defense_legacy",
+    "asr_no_defense_strict",
+    "asr_with_defense_strict",
     "latency_generation_sec",
 )
 
@@ -126,6 +148,14 @@ def build_diagnostic_record(
     generation-dependent kwargs default to None so this function -- and
     therefore full detection diagnostics -- works identically whether or not
     generation ran (e.g. under --dry_run).
+
+    `asr_no_defense`/`asr_with_defense` are taken as-is from the caller
+    (main.py's existing legacy substring-match flags, preserved for
+    backward compatibility). `asr_{no_defense,with_defense}_legacy` and
+    `asr_{no_defense,with_defense}_strict` are derived internally, purely
+    from `target_wrong_answer` and `answer_{no_defense,with_defense}`, via
+    `defense/asr_match.py` -- callers don't need to compute these
+    themselves.
     """
     removed = removed_passages(retrieved_passages, kept_passages)
 
@@ -165,6 +195,10 @@ def build_diagnostic_record(
         "gold_answer": gold_answer,
         "asr_no_defense": asr_no_defense,
         "asr_with_defense": asr_with_defense,
+        "asr_no_defense_legacy": legacy_match(target_wrong_answer, answer_no_defense),
+        "asr_with_defense_legacy": legacy_match(target_wrong_answer, answer_with_defense),
+        "asr_no_defense_strict": strict_match(target_wrong_answer, answer_no_defense),
+        "asr_with_defense_strict": strict_match(target_wrong_answer, answer_with_defense),
         "latency_retrieval_sec": latency_retrieval_sec,
         "latency_defense_sec": latency_defense_sec,
         "latency_generation_sec": latency_generation_sec,

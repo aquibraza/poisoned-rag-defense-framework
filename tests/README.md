@@ -2,7 +2,8 @@
 
 Lightweight `unittest`-based tests for the RAGDefender diagnostics work
 (`defense/passages.py`, `defense/diagnostics.py`, `defense/controls.py`,
-`defense/dispatch.py`, `scripts/summarize_ragdefender_diagnostics.py`).
+`defense/dispatch.py`, `defense/asr_match.py`,
+`scripts/summarize_ragdefender_diagnostics.py`).
 `pytest` is intentionally not used since it is not already a project
 dependency; everything here runs with the Python standard library.
 
@@ -23,7 +24,7 @@ python -m unittest tests.test_passages -v
 ## Dependency requirements per test file
 
 Most test files (`test_passages.py`, `test_controls.py`,
-`test_diagnostics_schema.py`, `test_summarizer.py`,
+`test_diagnostics_schema.py`, `test_asr_match.py`, `test_summarizer.py`,
 `test_existing_results_compat.py`) have **no third-party dependencies** and
 run with any Python 3 interpreter, including the system `python3`.
 
@@ -48,7 +49,17 @@ Vicuna) or require GPU access.
   stay faithful to ground-truth attack labels.
 - `test_diagnostics_schema.py` -- the diagnostic JSONL schema is fully
   populated (detection fields) or explicitly `None` (generation fields)
-  depending on whether generation ran; JSONL round-trips correctly.
+  depending on whether generation ran; JSONL round-trips correctly; the
+  strict/legacy ASR fields are correctly derived and can diverge (e.g.
+  target "no" vs. a response containing "does not").
+- `test_asr_match.py` -- `legacy_match` reproduces the repo's original
+  substring-match ASR behavior byte-for-byte (including its "no" vs.
+  "not"/"none"/"another"/"known" false positives); `strict_match`
+  (strict token-boundary ASR: a standalone yes/no token or exact
+  token-subsequence match) is verified against all of the required
+  no/yes/texas cases, the denylist words, and its documented
+  not-a-semantic-evaluator limitation (won't recognize "They are not in
+  the same place" as "no" without a standalone "no" token).
 - `test_controls.py` -- `oracle_remove_all_poison` removes exactly the
   poisoned passages and nothing else; `random_remove_same_count` removes
   exactly the requested count, deterministically per seed.
