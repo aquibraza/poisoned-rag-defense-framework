@@ -84,7 +84,15 @@ Vicuna) or require GPU access.
   device when available, and falls back (with a logged warning) when an
   explicit `mps`/`cuda` isn't actually available -- exercised with a fake
   `torch` module injected via `sys.modules` so this needs no real torch
-  install.
+  install; `_get_local_hf_slm_pipeline()` smoke-tests a freshly-loaded
+  non-CPU pipeline with one throwaway generation and falls back to CPU if it
+  fails (reproducing, with a fake `transformers` module, the real
+  `google/flan-t5-small` + torch==1.13 + MPS bug found during FilterRAG
+  epsilon calibration -- see `docs/FILTERRAG_BASELINE.md` §3.1 -- where
+  every SLM call failed and was silently swallowed, making `filterrag` and
+  `filterrag_query_only` produce identical scores); a per-passage SLM
+  failure degrades to "no answer" for just that passage but logs a warning
+  at least once rather than failing completely silently.
 - `test_summarizer.py` -- aggregation, CSV/Markdown report rendering
   (including the interpretation decision tree) against fake JSONL fixtures.
 - `test_existing_results_compat.py` -- pre-existing files under

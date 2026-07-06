@@ -150,6 +150,16 @@ VALID_SLM_DEVICES = ("auto", "cpu", "mps", "cuda")
 
 _SLM_PIPELINE_CACHE: Dict[Tuple[str, str], object] = {}
 _SLM_DEVICE_LOGGED = False
+_SLM_ANSWER_FAILURE_LOGGED = False
+
+# A tiny fixed smoke-test prompt used to verify a freshly-loaded SLM pipeline
+# can actually run generate() on its resolved device before it's handed out
+# for real use -- see _get_local_hf_slm_pipeline().
+_SLM_SMOKE_TEST_PROMPT = (
+    "Answer the question using only the context below.\n"
+    "Context: Paris is the capital of France.\n"
+    "Question: What is the capital of France?\nAnswer:"
+)
 
 
 def resolve_slm_device(requested: str = "auto") -> str:
@@ -201,18 +211,51 @@ def _get_local_hf_slm_pipeline(model_name: str = DEFAULT_SLM_MODEL, device: str 
     defense.filterrag` -- and anything that transitively imports it, like
     defense/dispatch.py -- never requires `transformers`/`torch` unless
     FilterRAG's SLM mode is actually used.
+
+    A freshly-loaded non-CPU pipeline is smoke-tested with one throwaway
+    generate() call before being cached/returned. This matters because
+    `local_hf_slm_answer_fn._answer()` swallows per-call generation
+    exceptions (treating them as "no SLM answer" for that one passage, so a
+    rare failure doesn't abort an entire defense run) -- without this
+    upfront probe, an accelerator that can *load* a model but can't actually
+    run generate() on it (e.g. torch==1.13's MPS backend does not implement
+    int64 abs() for T5-family relative-position-bias attention, so
+    google/flan-t5-small fails on every single call on MPS with that torch
+    version) would silently produce an empty SLM answer for 100% of
+    passages -- making `--defense filterrag` silently degrade to the
+    `filterrag_query_only` ablation with no error or warning at all.
     """
     global _SLM_DEVICE_LOGGED
     resolved_device = resolve_slm_device(device)
     cache_key = (model_name, resolved_device)
-    if cache_key not in _SLM_PIPELINE_CACHE:
-        from transformers import pipeline  # noqa: PLC0415 -- intentional lazy import
+    if cache_key in _SLM_PIPELINE_CACHE:
+        return _SLM_PIPELINE_CACHE[cache_key]
 
-        if not _SLM_DEVICE_LOGGED:
-            print(f"[FilterRAG] SLM device: {resolved_device} (model={model_name})")
-            _SLM_DEVICE_LOGGED = True
-        _SLM_PIPELINE_CACHE[cache_key] = pipeline("text2text-generation", model=model_name, device=resolved_device)
-    return _SLM_PIPELINE_CACHE[cache_key]
+    from transformers import pipeline  # noqa: PLC0415 -- intentional lazy import
+
+    pipe = pipeline("text2text-generation", model=model_name, device=resolved_device)
+
+    if resolved_device != "cpu":
+        try:
+            probe = pipe(_SLM_SMOKE_TEST_PROMPT, max_new_tokens=8, do_sample=False)
+            _ = probe[0]["generated_text"]
+        except Exception as exc:  # noqa: BLE001 -- any failure means "this device can't run this model"
+            print(
+                f"[FilterRAG] WARNING: SLM device={resolved_device!r} failed a smoke-test "
+                f"generation ({exc!r}); falling back to device='cpu' for model={model_name!r}. "
+                "Without this fallback, every generation call would silently fail and be "
+                "treated as an empty SLM answer (see defense/filterrag.py)."
+            )
+            resolved_device = "cpu"
+            cache_key = (model_name, resolved_device)
+            if cache_key not in _SLM_PIPELINE_CACHE:
+                pipe = pipeline("text2text-generation", model=model_name, device=resolved_device)
+
+    if not _SLM_DEVICE_LOGGED:
+        print(f"[FilterRAG] SLM device: {resolved_device} (model={model_name})")
+        _SLM_DEVICE_LOGGED = True
+    _SLM_PIPELINE_CACHE[cache_key] = pipe
+    return pipe
 
 
 def local_hf_slm_answer_fn(
@@ -223,14 +266,22 @@ def local_hf_slm_answer_fn(
     The paper uses LLaMA-2/3 as the SLM; this substitutes a much smaller
     model as a practical proxy (see module docstring for the fidelity
     tradeoff). `device` is resolved via `resolve_slm_device()` (default
-    'auto': MPS > CUDA > CPU). Any exception during generation (e.g. an
-    unexpectedly empty passage) is swallowed and treated as "no SLM
-    answer" (keywords fall back to query-only for that one passage) rather
-    than failing the whole defense call.
+    'auto': MPS > CUDA > CPU).     Any exception during a single passage's generation (e.g. an
+    unexpectedly empty passage) is treated as "no SLM answer" for that one
+    passage (keywords fall back to query-only just for it) rather than
+    failing the whole defense call -- but the first such failure is logged
+    with a warning (not fully silent), since 100% of calls failing here
+    would otherwise silently degrade `--defense filterrag` into the
+    `filterrag_query_only` ablation with no visible error (this previously
+    happened with google/flan-t5-small on MPS + torch==1.13; see
+    `_get_local_hf_slm_pipeline`'s upfront smoke test, which now catches
+    that specific failure mode before any real passage is scored).
     """
+    global _SLM_ANSWER_FAILURE_LOGGED
     pipe = _get_local_hf_slm_pipeline(model_name, device=device)
 
     def _answer(question: str, passage_text: str) -> Optional[str]:
+        global _SLM_ANSWER_FAILURE_LOGGED
         prompt = (
             f"Answer the question using only the context below.\n"
             f"Context: {passage_text}\nQuestion: {question}\nAnswer:"
@@ -238,7 +289,14 @@ def local_hf_slm_answer_fn(
         try:
             output = pipe(prompt, max_new_tokens=max_new_tokens, do_sample=False)
             return output[0]["generated_text"].strip()
-        except Exception:
+        except Exception as exc:  # noqa: BLE001 -- degrade this one passage, not the whole run
+            if not _SLM_ANSWER_FAILURE_LOGGED:
+                print(
+                    f"[FilterRAG] WARNING: SLM generation failed for a passage ({exc!r}); "
+                    "treating as no SLM answer for it (query-only keywords used instead). "
+                    "This message only prints once even if it recurs."
+                )
+                _SLM_ANSWER_FAILURE_LOGGED = True
             return None
 
     return _answer

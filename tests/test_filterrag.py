@@ -152,6 +152,126 @@ class TestResolveSlmDevice(unittest.TestCase):
                 resolve_slm_device("tpu")
 
 
+class TestSlmPipelineDeviceFallback(unittest.TestCase):
+    """_get_local_hf_slm_pipeline() smoke-tests a freshly-loaded non-cpu
+    pipeline with one throwaway generate() call and falls back to cpu if it
+    fails -- reproducing (without any real torch/transformers install or
+    GPU) the google/flan-t5-small + torch==1.13 + MPS failure mode
+    discovered during FilterRAG epsilon calibration: MPS in that torch
+    version doesn't implement int64 abs() for T5's relative-position-bias
+    attention, so every single SLM call failed and was silently swallowed
+    by local_hf_slm_answer_fn(), making `filterrag` and
+    `filterrag_query_only` produce byte-identical scores."""
+
+    def setUp(self):
+        import defense.filterrag as filterrag_module
+
+        self.filterrag_module = filterrag_module
+        self._orig_cache = dict(filterrag_module._SLM_PIPELINE_CACHE)
+        self._orig_device_logged = filterrag_module._SLM_DEVICE_LOGGED
+        self._orig_answer_logged = filterrag_module._SLM_ANSWER_FAILURE_LOGGED
+        filterrag_module._SLM_PIPELINE_CACHE.clear()
+        filterrag_module._SLM_DEVICE_LOGGED = False
+        filterrag_module._SLM_ANSWER_FAILURE_LOGGED = False
+
+    def tearDown(self):
+        self.filterrag_module._SLM_PIPELINE_CACHE.clear()
+        self.filterrag_module._SLM_PIPELINE_CACHE.update(self._orig_cache)
+        self.filterrag_module._SLM_DEVICE_LOGGED = self._orig_device_logged
+        self.filterrag_module._SLM_ANSWER_FAILURE_LOGGED = self._orig_answer_logged
+
+    @staticmethod
+    def _fake_transformers_module(*, failing_devices):
+        """Fake `transformers` module: pipeline() returns an object that
+        raises on __call__ if built for one of `failing_devices`, else
+        returns a canned generated_text."""
+        fake_transformers = types.ModuleType("transformers")
+
+        class _FakePipe:
+            def __init__(self, device):
+                self.device = device
+
+            def __call__(self, prompt, **kwargs):
+                if self.device in failing_devices:
+                    raise TypeError(
+                        "Operation 'abs_out_mps()' does not support input type 'int64' in MPS backend."
+                    )
+                return [{"generated_text": "Paris"}]
+
+        fake_transformers.pipeline = lambda task, model=None, device=None: _FakePipe(device)
+        return fake_transformers
+
+    def test_falls_back_to_cpu_when_mps_generation_fails(self):
+        fake_torch = _fake_torch_module(mps_available=True, cuda_available=False)
+        fake_transformers = self._fake_transformers_module(failing_devices={"mps"})
+        with mock.patch.dict(sys.modules, {"torch": fake_torch, "transformers": fake_transformers}):
+            pipe = self.filterrag_module._get_local_hf_slm_pipeline("fake-model", device="mps")
+        self.assertEqual(pipe.device, "cpu")
+        self.assertIn(("fake-model", "cpu"), self.filterrag_module._SLM_PIPELINE_CACHE)
+
+    def test_no_fallback_when_device_actually_works(self):
+        fake_torch = _fake_torch_module(mps_available=True, cuda_available=False)
+        fake_transformers = self._fake_transformers_module(failing_devices=set())
+        with mock.patch.dict(sys.modules, {"torch": fake_torch, "transformers": fake_transformers}):
+            pipe = self.filterrag_module._get_local_hf_slm_pipeline("fake-model", device="mps")
+        self.assertEqual(pipe.device, "mps")
+
+    def test_cpu_device_never_smoke_tested(self):
+        # cpu is the trusted baseline -- no probe call should run against it,
+        # so even a pipe that would fail on cpu is returned unchanged
+        # (this only matters for this synthetic test; real cpu pipelines
+        # don't hit the MPS-specific op-support failure).
+        fake_torch = _fake_torch_module(mps_available=False, cuda_available=False)
+        fake_transformers = self._fake_transformers_module(failing_devices={"cpu"})
+        with mock.patch.dict(sys.modules, {"torch": fake_torch, "transformers": fake_transformers}):
+            pipe = self.filterrag_module._get_local_hf_slm_pipeline("fake-model", device="cpu")
+        self.assertEqual(pipe.device, "cpu")
+
+
+class TestLocalHfSlmAnswerFnFailureLogging(unittest.TestCase):
+    """Per-passage SLM failures must degrade to `None` (query-only keywords
+    for that one passage) but log a warning at least once -- not fail
+    completely silently, which is what let the MPS bug above go unnoticed."""
+
+    def setUp(self):
+        import defense.filterrag as filterrag_module
+
+        self.filterrag_module = filterrag_module
+        self._orig_cache = dict(filterrag_module._SLM_PIPELINE_CACHE)
+        self._orig_device_logged = filterrag_module._SLM_DEVICE_LOGGED
+        self._orig_answer_logged = filterrag_module._SLM_ANSWER_FAILURE_LOGGED
+        filterrag_module._SLM_PIPELINE_CACHE.clear()
+        filterrag_module._SLM_DEVICE_LOGGED = False
+        filterrag_module._SLM_ANSWER_FAILURE_LOGGED = False
+
+    def tearDown(self):
+        self.filterrag_module._SLM_PIPELINE_CACHE.clear()
+        self.filterrag_module._SLM_PIPELINE_CACHE.update(self._orig_cache)
+        self.filterrag_module._SLM_DEVICE_LOGGED = self._orig_device_logged
+        self.filterrag_module._SLM_ANSWER_FAILURE_LOGGED = self._orig_answer_logged
+
+    def test_per_passage_failure_degrades_to_none_and_logs_once(self):
+        fake_torch = _fake_torch_module(mps_available=False, cuda_available=False)
+        fake_transformers = types.ModuleType("transformers")
+
+        class _AlwaysFailingPipe:
+            def __call__(self, prompt, **kwargs):
+                raise RuntimeError("boom")
+
+        fake_transformers.pipeline = lambda task, model=None, device=None: _AlwaysFailingPipe()
+
+        with mock.patch.dict(sys.modules, {"torch": fake_torch, "transformers": fake_transformers}):
+            answer_fn = self.filterrag_module.local_hf_slm_answer_fn("fake-model", device="cpu")
+            with mock.patch("builtins.print") as mock_print:
+                result1 = answer_fn("Q1?", "passage1")
+                result2 = answer_fn("Q2?", "passage2")
+
+        self.assertIsNone(result1)
+        self.assertIsNone(result2)
+        warning_calls = [c for c in mock_print.call_args_list if "WARNING" in str(c)]
+        self.assertEqual(len(warning_calls), 1)  # logged once, not once per failure
+
+
 class TestFilterragDefense(unittest.TestCase):
     def test_removes_only_passages_above_epsilon(self):
         passages = make_passages()

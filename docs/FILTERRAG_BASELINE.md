@@ -99,9 +99,8 @@ work" below.
 ## 3. Known deviations from the published method
 
 - **SLM choice**: the paper uses LLaMA-2/3 as the SLM. This machine has no
-  CUDA/NVIDIA GPU; Apple Silicon Metal/MPS may be available (the current
-  development machine is an Apple Silicon M4 MacBook Air, which does have
-  MPS), but a 7B model would still be far too slow to run once per retrieved
+  CUDA/NVIDIA GPU; it does have Apple Silicon Metal/MPS (an M4 MacBook Air),
+  but a 7B model would still be far too slow to run once per retrieved
   passage per query at any useful scale on it. `local_hf_slm_answer_fn()`
   defaults to **`google/flan-t5-small`** (~80M params) as a small, fast
   proxy instead -- this default is unchanged regardless of which accelerator
@@ -118,9 +117,32 @@ work" below.
   `torch.backends.mps.is_available()`, else CUDA if available, else CPU.
   Override with `--filterrag_slm_device {auto,cpu,mps,cuda}`; an explicit
   `mps`/`cuda` that isn't actually available on the machine logs a warning
-  and falls back to auto-detection rather than failing the run. The
-  resolved device is logged once (e.g. `[FilterRAG] SLM device: mps
-  (model=google/flan-t5-small)`), not per-passage/per-query.
+  and falls back to auto-detection rather than failing the run.
+  **In practice, on this repo's dev machine, `--filterrag_slm_device auto`
+  first tries `mps` (it *is* available -- `torch.backends.mps.is_available()`
+  is `True`) but `google/flan-t5-small` fails an immediate post-load
+  smoke-test generation on it, so `_get_local_hf_slm_pipeline()` falls back
+  to `cpu` before any real passage is ever scored -- `--defense filterrag`
+  runs the SLM on CPU on this machine, not MPS** (see "Known issue" and
+  §3.1 immediately below for why). The resolved *final* device is logged
+  once (e.g. `[FilterRAG] SLM device: cpu (model=google/flan-t5-small)`,
+  preceded by the fallback warning if one occurred), not per-passage/per-query.
+  **Known issue (found + fixed during epsilon calibration, see §3.1
+  below):** on this repo's dev environment (torch==1.13, transformers==4.30,
+  Apple Silicon M4), `google/flan-t5-small` on `mps` fails *every single*
+  generation call with `TypeError: Operation 'abs_out_mps()' does not
+  support input type 'int64' in MPS backend` (torch 1.13's MPS backend
+  doesn't implement `abs()` on int64 tensors, which T5's relative-position-
+  bias attention needs). `_get_local_hf_slm_pipeline()` now runs one
+  throwaway smoke-test generation immediately after loading any non-CPU
+  pipeline and falls back to `cpu` (with a printed warning) if it fails,
+  specifically so this doesn't silently degrade into "every SLM answer is
+  empty" the way it did before this fix (see §3.1). `flan-t5-small` on CPU
+  is fast enough in practice (~0.3-0.6s/passage) that this fallback has no
+  material runtime cost at this repo's scale (10s of queries). A larger
+  model, a newer torch version, or a non-T5 architecture could still
+  legitimately run on `mps` -- the smoke test decides this per
+  `(model_name, device)` pair, it is not a hardcoded "never use MPS" rule.
 - **`filterrag_query_only`** (see above) is an added diagnostic ablation, not
   part of the paper. It exists purely so the pipeline (dispatch, diagnostics
   logging, k-sweep, summarizer) can be smoke-tested and run at zero cost
@@ -134,6 +156,51 @@ work" below.
   may differ. `--filterrag_epsilon` is exposed specifically so this can be
   swept/tuned once live diagnostics are available, rather than trusting the
   paper's value blindly.
+
+### 3.1 Calibration finding: the SLM step was silently inert on MPS
+
+The first detection-only diagnostic sweep (HotpotQA, 10 queries, k=5/10,
+epsilon=0.2) found that `filterrag` (SLM-backed) and `filterrag_query_only`
+(no SLM) produced **byte-for-byte identical removal decisions** on every
+query. The root cause was not epsilon miscalibration: it was the MPS/T5
+bug described in §3 above. `local_hf_slm_answer_fn()`'s per-passage
+`try/except Exception: return None` swallowed that `TypeError` completely
+silently, so `google/flan-t5-small` produced an **empty `SLM_answer` for
+100% of the 150 passages scored** in that sweep -- `filterrag`'s Freq-Density
+score was therefore mathematically identical to `filterrag_query_only`'s
+(keywords = query tokens only, in both modes) even though the code path
+*looked* like it was running the full SLM-backed algorithm.
+
+`scripts/filterrag_score_inspection.py` was added to catch exactly this
+class of failure: it computes both the full and query-only score for every
+retrieved passage up front (rather than trusting one epsilon's removal
+decision), so a "0% of scores differ" result is visible immediately instead
+of looking like a plausible epsilon-tuning outcome. After the
+`_get_local_hf_slm_pipeline()` smoke-test fallback (§3, "Device placement")
+was added, `flan-t5-small` runs on CPU instead, producing real (often
+multi-word) answers, and the two modes now diverge on **38/100 passages at
+k=10** (10-query HotpotQA set) -- e.g. an SLM answer of "Neither are solely
+used for real estate transactions." raises a poisoned passage's score from
+0.893 (query-only) to 1.000 (full), and an answer of "Mrs. Tiggy-Winkle"
+(matching a specific hedgehog character name absent from the query) raises
+another poisoned passage from 0.552 to 0.655. See
+`results/diagnostics/filterrag_calibration_10q/FILTERRAG_SCORE_EXAMPLES.md`
+and `FILTERRAG_EPSILON_SWEEP_REPORT.md` for the full breakdown across
+epsilon in [0.2, 0.8]. At low epsilon (<=0.5) both modes already saturate
+poison recall to 1.0 on this 10-query set (the injected adversarial text is
+heavily keyword-stuffed with the query itself, so query-only keywords alone
+are already enough), so the SLM's incremental benefit shows up mainly at
+higher epsilon (e.g. k=10, epsilon=0.6: poison recall 0.90 full vs. 0.84
+query-only) and in the qualitative per-passage examples above, not yet in
+the aggregate metrics at the paper's default epsilon=0.2 on this small
+sample.
+
+**Lesson for future baselines**: never trust a defense's own removal
+decisions alone to validate that an optional sub-component (here, the SLM)
+is actually contributing -- a component that fails 100% of the time can be
+indistinguishable from "this ablation doesn't matter" unless the raw
+per-item signal (here, `slm_answer` text and the two score variants) is
+inspected directly.
 
 ## 4. How to run diagnostics
 
@@ -157,15 +224,34 @@ python scripts/summarize_ragdefender_diagnostics.py \
 python scripts/run_ragdefender_k_sweep.py --quick_filterrag_hotpotqa --execute --live_generation
 ```
 
+For epsilon calibration / inspecting per-passage scores directly (no
+`main.py`/dispatch involved, no live GPT generation -- see §3.1 above):
+
+```bash
+python scripts/filterrag_score_inspection.py \
+  --eval_dataset hotpotqa --k_values 5 10 --N 5 --max_queries 10 \
+  --out_dir results/diagnostics/filterrag_calibration_10q
+```
+
+This writes a per-passage score CSV (`filterrag_score_inspection.csv`), an
+epsilon-sweep summary CSV/report (`filterrag_epsilon_sweep.csv`,
+`FILTERRAG_EPSILON_SWEEP_REPORT.md`), and a handful of worked examples
+(`FILTERRAG_SCORE_EXAMPLES.md`) -- all computed from one retrieval +
+one-pass-per-passage SLM scoring run, so sweeping `--epsilons` costs nothing
+extra.
+
 Note: unlike RAGDefender (which only needs `sentence-transformers` +
 `torch`), `--defense filterrag` additionally downloads
 `google/flan-t5-small` from the HuggingFace Hub on first use (a few hundred
 MB, one-time, cached under `~/.cache/huggingface/hub`) and runs it locally
 once per retrieved passage per query, on whichever device
-`resolve_slm_device()` selects (Apple Silicon Metal/MPS on this repo's
-development machine) -- this makes step 2 noticeably slower than the
-equivalent RAGDefender run, especially at higher `k`. `filterrag_query_only`
-has no such cost and is exactly as fast as `none`.
+`resolve_slm_device()`/`_get_local_hf_slm_pipeline()` resolves to at
+runtime -- `auto` tries Apple Silicon Metal/MPS first on this repo's
+development machine, but falls back to CPU there because
+`google/flan-t5-small` fails its post-load smoke test on `mps` (see §3
+"Device placement" and §3.1) -- this makes step 2 noticeably slower than
+the equivalent RAGDefender run, especially at higher `k`.
+`filterrag_query_only` has no such cost and is exactly as fast as `none`.
 
 ## 5. Deferred work
 
