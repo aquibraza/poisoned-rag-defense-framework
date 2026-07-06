@@ -13,6 +13,9 @@ diagnostics without touching `defense/defense_runner.py`:
   count independent of whether RAGDefender is the active defense.
 - `oracle_remove_all_poison` / `random_remove_same_count` delegate to
   `defense/controls.py` (diagnostic controls, not deployable defenses).
+- `filterrag` / `filterrag_query_only` delegate to `defense/filterrag.py`
+  (Edemacu et al. 2025 baseline; a second, independent defense family from
+  RAGDefender, so its own failure modes and comparisons are meaningful).
 - `none` is a pass-through.
 """
 from __future__ import annotations
@@ -22,6 +25,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 from defense import defense_runner
 from defense.controls import oracle_remove_all_poison, random_remove_same_count
+from defense.filterrag import DEFAULT_EPSILON, filterrag_defense, local_hf_slm_answer_fn
 from defense.passages import RetrievedPassage
 
 # Canonical set of values accepted by --defense in main.py.
@@ -31,7 +35,13 @@ DEFENSE_CHOICES = (
     "ragdefender_original",
     "oracle_remove_all_poison",
     "random_remove_same_count",
+    "filterrag",
+    "filterrag_query_only",
 )
+
+# Defenses that are diagnostic ablations of filterrag, not the published
+# algorithm (no SLM step) -- see defense/filterrag.py module docstring.
+FILTERRAG_ABLATION_DEFENSES = ("filterrag_query_only",)
 
 # Defenses that are diagnostic-only controls, not deployable defenses.
 DIAGNOSTIC_CONTROL_DEFENSES = ("oracle_remove_all_poison", "random_remove_same_count")
@@ -130,6 +140,9 @@ def run_defense(
     top_k: Optional[int] = None,
     seed: int = 12,
     query_id: Optional[str] = None,
+    filterrag_epsilon: float = DEFAULT_EPSILON,
+    filterrag_slm_model: str = "google/flan-t5-small",
+    filterrag_slm_device: str = "auto",
 ) -> Tuple[List[RetrievedPassage], Dict]:
     """Apply `defense_name` to `passages` and return (kept_passages, diag_extra).
 
@@ -141,6 +154,11 @@ def run_defense(
     derive a per-query effective seed (`stable_seed_for_query`) so the
     random-removal baseline draws an independent sample per query instead of
     repeating the same relative removal pattern across every query in a run.
+
+    `filterrag_epsilon`/`filterrag_slm_model`/`filterrag_slm_device` only
+    apply to `filterrag`/`filterrag_query_only` -- see defense/filterrag.py.
+    `filterrag_slm_device` is unused by `filterrag_query_only` (no SLM is
+    ever loaded in that mode).
     """
     name = (defense_name or "none").lower()
 
@@ -162,6 +180,13 @@ def run_defense(
         return random_remove_same_count(
             passages, n_to_remove=n_estimate, seed=seed, query_id=query_id
         )
+
+    if name == "filterrag_query_only":
+        return filterrag_defense(query, passages, epsilon=filterrag_epsilon, slm_answer_fn=None)
+
+    if name == "filterrag":
+        slm_answer_fn = local_hf_slm_answer_fn(filterrag_slm_model, device=filterrag_slm_device)
+        return filterrag_defense(query, passages, epsilon=filterrag_epsilon, slm_answer_fn=slm_answer_fn)
 
     raise ValueError(
         f"Unknown defense {defense_name!r}; expected one of {DEFENSE_CHOICES}"

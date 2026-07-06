@@ -47,6 +47,8 @@ ALL_DEFENSE_CHOICES = [
     "ragdefender_original",
     "oracle_remove_all_poison",
     "random_remove_same_count",
+    "filterrag",
+    "filterrag_query_only",
 ]
 
 # "Diagnostics-only quick mode" preset (see docs/RAGDEFENDER_DIAGNOSTIC_PLAN.md).
@@ -59,6 +61,15 @@ QUICK_HOTPOTQA_DEFENSES = [
     "ragdefender_original",
     "oracle_remove_all_poison",
     "random_remove_same_count",
+]
+
+# "Diagnostics-only quick mode" preset for the FilterRAG baseline (see
+# docs/FILTERRAG_BASELINE.md). Same k/N/max_queries as the RAGDefender quick
+# preset for a fair side-by-side comparison.
+QUICK_FILTERRAG_HOTPOTQA_DEFENSES = [
+    "none",
+    "filterrag_query_only",
+    "filterrag",
 ]
 
 
@@ -80,6 +91,9 @@ def build_command(
     seed: int,
     random_removal_seed: int,
     model_config_path: str = None,
+    filterrag_epsilon: float = None,
+    filterrag_slm_model: str = None,
+    filterrag_slm_device: str = None,
 ):
     name = build_run_name(dataset, k, N, defense, max_queries)
     cmd = [
@@ -114,6 +128,12 @@ def build_command(
     # relying on that model_name-derived default.
     if model_config_path:
         cmd += ["--model_config_path", model_config_path]
+    if filterrag_epsilon is not None:
+        cmd += ["--filterrag_epsilon", str(filterrag_epsilon)]
+    if filterrag_slm_model:
+        cmd += ["--filterrag_slm_model", filterrag_slm_model]
+    if filterrag_slm_device:
+        cmd += ["--filterrag_slm_device", filterrag_slm_device]
     return cmd, name
 
 
@@ -148,6 +168,18 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=12)
     parser.add_argument("--random_removal_seed", type=int, default=12)
     parser.add_argument(
+        "--filterrag_epsilon", type=float, default=None,
+        help="Passed straight through to main.py's --filterrag_epsilon (paper default 0.2).",
+    )
+    parser.add_argument(
+        "--filterrag_slm_model", type=str, default=None,
+        help="Passed straight through to main.py's --filterrag_slm_model.",
+    )
+    parser.add_argument(
+        "--filterrag_slm_device", type=str, default=None, choices=["auto", "cpu", "mps", "cuda"],
+        help="Passed straight through to main.py's --filterrag_slm_device.",
+    )
+    parser.add_argument(
         "--execute", action="store_true",
         help=(
             "Actually run the generated main.py commands via subprocess. Without this "
@@ -170,11 +202,25 @@ def parse_args():
             "saturation hypothesis. Overrides --datasets/--k_values/--max_queries/--N/--defenses."
         ),
     )
+    parser.add_argument(
+        "--quick_filterrag_hotpotqa", action="store_true",
+        help=(
+            "Diagnostics-only preset for the FilterRAG baseline: same "
+            "HotpotQA/max_queries=10/N=5/k in [5, 10] as --quick_hotpotqa, but "
+            "defenses=[none, filterrag_query_only, filterrag]. See "
+            "docs/FILTERRAG_BASELINE.md. Overrides "
+            "--datasets/--k_values/--max_queries/--N/--defenses."
+        ),
+    )
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
+
+    if args.quick_hotpotqa and args.quick_filterrag_hotpotqa:
+        print("--quick_hotpotqa and --quick_filterrag_hotpotqa are mutually exclusive.", file=sys.stderr)
+        sys.exit(2)
 
     if args.quick_hotpotqa:
         datasets = [QUICK_HOTPOTQA_DATASET]
@@ -183,6 +229,13 @@ def main():
         N = QUICK_HOTPOTQA_N
         defenses = QUICK_HOTPOTQA_DEFENSES
         print("Using --quick_hotpotqa preset (diagnostics-only quick mode).")
+    elif args.quick_filterrag_hotpotqa:
+        datasets = [QUICK_HOTPOTQA_DATASET]
+        k_values = QUICK_HOTPOTQA_K_VALUES
+        max_queries = QUICK_HOTPOTQA_MAX_QUERIES
+        N = QUICK_HOTPOTQA_N
+        defenses = QUICK_FILTERRAG_HOTPOTQA_DEFENSES
+        print("Using --quick_filterrag_hotpotqa preset (diagnostics-only quick mode).")
     else:
         datasets = args.datasets
         k_values = args.k_values
@@ -212,6 +265,9 @@ def main():
                     seed=args.seed,
                     random_removal_seed=args.random_removal_seed,
                     model_config_path=args.model_config_path,
+                    filterrag_epsilon=args.filterrag_epsilon,
+                    filterrag_slm_model=args.filterrag_slm_model,
+                    filterrag_slm_device=args.filterrag_slm_device,
                 )
                 commands.append((cmd, name))
 

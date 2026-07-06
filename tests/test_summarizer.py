@@ -181,7 +181,7 @@ class TestReportRendering(unittest.TestCase):
         self.assertIn("Interpretation decision tree", report)
         self.assertIn("Worst 10 queries", report)
         self.assertIn("removed more clean than poisoned", report)
-        self.assertIn("RAGDefender vs. oracle vs. random removal", report)
+        self.assertIn("RAGDefender vs. FilterRAG vs. oracle vs. random removal", report)
 
     def test_report_distinguishes_legacy_and_strict_asr(self):
         records = [

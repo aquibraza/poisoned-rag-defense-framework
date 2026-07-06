@@ -17,6 +17,7 @@ from src.prompts import wrap_prompt
 import torch
 
 from defense.dispatch import DEFENSE_CHOICES, run_defense
+from defense.filterrag import DEFAULT_EPSILON as FILTERRAG_DEFAULT_EPSILON
 from defense.passages import label_passages
 from defense.passages import texts as passage_texts
 from defense.diagnostics import (
@@ -101,6 +102,35 @@ def parse_args():
         type=int,
         default=12,
         help="Seed for the random_remove_same_count diagnostic control.",
+    )
+    parser.add_argument(
+        "--filterrag_epsilon",
+        type=float,
+        default=FILTERRAG_DEFAULT_EPSILON,
+        help="Freq-Density threshold for filterrag/filterrag_query_only (paper default 0.2).",
+    )
+    parser.add_argument(
+        "--filterrag_slm_model",
+        type=str,
+        default="google/flan-t5-small",
+        help=(
+            "HF model name used as FilterRAG's small language model (SLM) for "
+            "per-passage answer generation. Only used by --defense filterrag "
+            "(not filterrag_query_only, which skips the SLM step entirely). "
+            "See defense/filterrag.py for the fidelity tradeoff vs. the "
+            "paper's LLaMA-2/3 SLM."
+        ),
+    )
+    parser.add_argument(
+        "--filterrag_slm_device",
+        type=str,
+        default="auto",
+        choices=["auto", "cpu", "mps", "cuda"],
+        help=(
+            "Device for FilterRAG's SLM ('auto': Apple Silicon Metal/MPS if "
+            "available, else CUDA, else CPU). Only used by --defense filterrag. "
+            "See defense/filterrag.py:resolve_slm_device()."
+        ),
     )
 
     # attack
@@ -318,6 +348,9 @@ def main():
                         top_k=args.top_k,
                         seed=args.random_removal_seed,
                         query_id=incorrect_answers[i]['id'],
+                        filterrag_epsilon=args.filterrag_epsilon,
+                        filterrag_slm_model=args.filterrag_slm_model,
+                        filterrag_slm_device=args.filterrag_slm_device,
                     )
                 latency_defense_sec = _dt["elapsed_sec"]
                 topk_contents = passage_texts(kept_passages)

@@ -2,7 +2,7 @@
 
 Lightweight `unittest`-based tests for the RAGDefender diagnostics work
 (`defense/passages.py`, `defense/diagnostics.py`, `defense/controls.py`,
-`defense/dispatch.py`, `defense/asr_match.py`,
+`defense/dispatch.py`, `defense/asr_match.py`, `defense/filterrag.py`,
 `scripts/summarize_ragdefender_diagnostics.py`).
 `pytest` is intentionally not used since it is not already a project
 dependency; everything here runs with the Python standard library.
@@ -24,9 +24,12 @@ python -m unittest tests.test_passages -v
 ## Dependency requirements per test file
 
 Most test files (`test_passages.py`, `test_controls.py`,
-`test_diagnostics_schema.py`, `test_asr_match.py`, `test_summarizer.py`,
-`test_existing_results_compat.py`) have **no third-party dependencies** and
-run with any Python 3 interpreter, including the system `python3`.
+`test_diagnostics_schema.py`, `test_asr_match.py`, `test_filterrag.py`,
+`test_summarizer.py`, `test_existing_results_compat.py`) have **no
+third-party dependencies** and run with any Python 3 interpreter, including
+the system `python3`. `test_filterrag.py` in particular never imports
+`transformers`/loads any HF model -- `slm_answer_fn` is always a plain mock
+function, exactly like `test_dispatch_smoke.py` mocks RAGDefender's encoder.
 
 `test_dispatch_smoke.py` imports `defense.dispatch`, which imports
 `defense.defense_runner`, which imports `torch` and (lazily)
@@ -38,7 +41,10 @@ encoder -- but it does need `torch` + `scikit-learn` + `sentence-transformers`
 importable. If your project virtualenv (e.g. `PoisonedRAG_env`) can't load
 `torch` due to macOS Gatekeeper quarantine, see `fix_venv_gatekeeper.sh` at
 the repo root, or create a fresh venv and
-`pip install torch scikit-learn sentence-transformers`.
+`pip install torch scikit-learn sentence-transformers`. Its
+`filterrag_query_only` cases need no such setup (no SLM, no
+sentence-transformers) and would pass even without `defense_runner`'s heavy
+deps, but the file as a whole still requires them to import at all.
 
 None of the tests here make any LLM/API call (no GPT-4, no PaLM, no
 Vicuna) or require GPU access.
@@ -64,8 +70,21 @@ Vicuna) or require GPU access.
   poisoned passages and nothing else; `random_remove_same_count` removes
   exactly the requested count, deterministically per seed.
 - `test_dispatch_smoke.py` -- `none`/`ragdefender_original`/
-  `oracle_remove_all_poison`/`random_remove_same_count` all run end-to-end
-  through `defense.dispatch.run_defense()` fully offline.
+  `oracle_remove_all_poison`/`random_remove_same_count`/
+  `filterrag_query_only` all run end-to-end through
+  `defense.dispatch.run_defense()` fully offline.
+- `test_filterrag.py` -- `freq_density()` scores keyword-stuffed passages
+  higher than unrelated ones (case-insensitive, no double-counting of
+  duplicate keywords); `score_passages()`/`filterrag_defense()` behave
+  correctly both in the query-only ablation mode (`slm_answer_fn=None`) and
+  with a mocked SLM answer function; threshold (`epsilon`) behavior at its
+  extremes (0.0 removes everything, a very high value removes nothing); kept
+  passages preserve their original metadata; `resolve_slm_device()`
+  correctly prefers MPS > CUDA > CPU under `auto`, honors an explicit
+  device when available, and falls back (with a logged warning) when an
+  explicit `mps`/`cuda` isn't actually available -- exercised with a fake
+  `torch` module injected via `sys.modules` so this needs no real torch
+  install.
 - `test_summarizer.py` -- aggregation, CSV/Markdown report rendering
   (including the interpretation decision tree) against fake JSONL fixtures.
 - `test_existing_results_compat.py` -- pre-existing files under

@@ -241,6 +241,23 @@ implementation issue, or an evaluation issue.
 
 ---
 
+## Defense: FilterRAG
+
+A second, independent defense baseline (`defense/filterrag.py`), based on
+Edemacu et al. (2025): a per-passage statistical filter that scores each
+retrieved passage by keyword "Freq-Density" (query + small-model-generated
+answer keywords vs. the passage's own text) and drops passages above a
+threshold. Unlike RAGDefender's cross-passage clustering, this doesn't rely
+on a clean-cluster anchor, so it's evaluated as a candidate that may be more
+robust to the 100%-poisoned-context case. See
+[`docs/FILTERRAG_BASELINE.md`](docs/FILTERRAG_BASELINE.md) for the
+implementation, its deviations from the published method (a small local
+model substitutes for the paper's LLaMA-2/3 SLM), and how to run its
+diagnostics (`--defense filterrag` / `filterrag_query_only`,
+`--quick_filterrag_hotpotqa`).
+
+---
+
 ## Supported Models
 
 | Model | Provider | Config Template |

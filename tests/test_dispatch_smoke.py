@@ -156,6 +156,37 @@ class TestOracleAndRandomThroughDispatch(DispatchSmokeTestBase):
         self.assertNotEqual(doc_ids_q1, doc_ids_q2)
 
 
+class TestFilterragQueryOnlyThroughDispatch(unittest.TestCase):
+    """filterrag_query_only needs no sentence-transformers/torch model at
+    all (unlike ragdefender_original), so this doesn't need the
+    DispatchSmokeTestBase._get_s_model patch -- it's the cheapest defense to
+    smoke test."""
+
+    def test_filterrag_query_only_removes_keyword_stuffed_passage(self):
+        raw = [
+            {"doc_id": "clean1", "context": "Some unrelated clean fact about the world.", "score": 0.9, "source": "corpus", "is_poison": False},
+            {"doc_id": "adv1", "context": "texas texas texas texas is the texas state texas.", "score": 0.85, "source": "adversarial", "is_poison": True},
+        ]
+        passages = label_passages(raw)
+        kept, diag = dispatch.run_defense("filterrag_query_only", "Where is texas?", passages, "hotpotqa")
+        kept_ids = {p.doc_id for p in kept}
+        self.assertNotIn("adv1", kept_ids)
+        self.assertIn("clean1", kept_ids)
+        self.assertEqual(diag["N_adv_estimated_by_ragdefender"], 1)
+        self.assertIn("filterrag_scores", diag)
+
+    def test_filterrag_epsilon_is_configurable(self):
+        raw = [
+            {"doc_id": "clean1", "context": "Some unrelated clean fact.", "score": 0.9, "source": "corpus", "is_poison": False},
+            {"doc_id": "adv1", "context": "texas texas texas is the state.", "score": 0.85, "source": "adversarial", "is_poison": True},
+        ]
+        passages = label_passages(raw)
+        kept, _ = dispatch.run_defense(
+            "filterrag_query_only", "Where is texas?", passages, "hotpotqa", filterrag_epsilon=1000.0
+        )
+        self.assertEqual(len(kept), len(passages))  # nothing crosses an impossibly high threshold
+
+
 class TestUnknownDefenseRaises(unittest.TestCase):
     def test_unknown_defense_name_raises(self):
         passages = label_passages(make_raw_hotpotqa_like())

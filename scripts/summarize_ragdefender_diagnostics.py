@@ -68,7 +68,10 @@ CSV_COLUMNS = [
 
 # Defenses that removal-quality metrics are meaningful for (i.e. actually
 # attempt removal); "none" is intentionally excluded from decision-tree logic.
-REMOVAL_DEFENSES = {"ragdefender", "ragdefender_original", "oracle_remove_all_poison", "random_remove_same_count"}
+REMOVAL_DEFENSES = {
+    "ragdefender", "ragdefender_original", "oracle_remove_all_poison", "random_remove_same_count",
+    "filterrag", "filterrag_query_only",
+}
 RAGDEFENDER_NAMES = {"ragdefender", "ragdefender_original"}
 
 
@@ -376,7 +379,7 @@ def render_clean_gt_poison_removals(records: List[Dict]) -> str:
 
 
 def render_comparison_table(summaries: List[Dict]) -> str:
-    lines = ["## 6. RAGDefender vs. oracle vs. random removal", "", DIAGNOSTIC_CONTROL_WARNING, ""]
+    lines = ["## 6. RAGDefender vs. FilterRAG vs. oracle vs. random removal", "", DIAGNOSTIC_CONTROL_WARNING, ""]
     by_dataset_k: Dict[Tuple[str, int], Dict[str, Dict]] = defaultdict(dict)
     for s in summaries:
         by_dataset_k[(s["dataset"], s["k"])][s["defense"]] = s
@@ -391,7 +394,11 @@ def render_comparison_table(summaries: List[Dict]) -> str:
     )
     lines.append("|---|---|---|---|---|---|---|---|")
     for (dataset, k), by_defense in sorted(by_dataset_k.items(), key=lambda kv: (kv[0][0], kv[0][1])):
-        for defense_name in ["none", "ragdefender_original", "ragdefender", "oracle_remove_all_poison", "random_remove_same_count"]:
+        for defense_name in [
+            "none", "ragdefender_original", "ragdefender",
+            "filterrag", "filterrag_query_only",
+            "oracle_remove_all_poison", "random_remove_same_count",
+        ]:
             s = by_defense.get(defense_name)
             if s is None:
                 continue
