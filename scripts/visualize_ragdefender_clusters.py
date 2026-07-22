@@ -60,10 +60,12 @@ if REPO_ROOT not in sys.path:
 import numpy as np
 import pandas as pd
 
-import fix_sentence_transformers  # noqa: E402,F401 -- required before any sentence_transformers import, matches main.py's compat patch
+try:
+    import fix_sentence_transformers  # noqa: F401 -- optional compat patch for older sentence_transformers
+except ImportError:
+    pass
 
 from defense.defense_runner import _lazy_st  # noqa: SLF001 -- intentional reuse of the exact ST/util import path ragdefender_original itself uses
-from defense.diagnostics import read_jsonl
 from defense.ragdefender_internals import (
     ConcentrationResult,
     Stage2Result,
@@ -74,6 +76,19 @@ from defense.ragdefender_internals import (
 DEFAULT_OUTPUT_DIR = os.path.join("results", "diagnostics", "ragdefender_cluster_viz")
 DEFAULT_EMBEDDER = "paraphrase-MiniLM-L6-v2"
 DEFAULT_STAGE2_P = 2.0
+
+
+def _read_jsonl(path: str) -> List[Dict]:
+    """Read all JSON records from a diagnostics JSONL file."""
+    records: List[Dict] = []
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            records.append(json.loads(line))
+    return records
+
 
 EMBEDDER_SHORT_NAMES = {
     "paraphrase-MiniLM-L6-v2": "paraphraseMiniLM",
@@ -748,7 +763,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
 def main(argv: Optional[List[str]] = None) -> Path:
     args = parse_args(argv)
 
-    records = read_jsonl(args.diagnostics_jsonl)
+    records = _read_jsonl(args.diagnostics_jsonl)
     if not records:
         raise ValueError(f"No records found in {args.diagnostics_jsonl}")
     if args.query_id:
