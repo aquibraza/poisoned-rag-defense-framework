@@ -162,10 +162,15 @@ cython_debug/
 datasets
 logs
 
+#Fall Proposal Tex
+amazon_proposal
+
+
 # Virtual environments
 PoisonedRAG_env/
 venv/
 .venv/
+.venv_*/
 
 # API keys and model configs with credentials (use *.template.json for sharing configs)
 model_configs/*.json
@@ -175,6 +180,9 @@ model_configs/*.json
 *.zip
 results/beir_results/
 results/adv_targeted_results/
+
+# RAGDefender generated cluster visualization artifacts
+results/diagnostics/ragdefender_cluster_viz/
 
 # Cursor workspace/project files
 .cursor/
