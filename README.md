@@ -230,6 +230,32 @@ Located in `defense/defense_runner.py`, RAGDefender detects and removes poisoned
 3. **Remove** the highest-scoring (most suspicious) documents
 4. **Prompt** the LLM with the cleaned context
 
+The default experiments above use `k=5` retrieved passages with `N=5`
+injected adversarial passages — i.e. a **100%-poisoned retrieved context**,
+which is a deliberate stress test rather than RAGDefender's assumed
+operating point. See [`docs/RAGDEFENDER_DIAGNOSTIC_PLAN.md`](docs/RAGDEFENDER_DIAGNOSTIC_PLAN.md)
+for a diagnostic evaluation (poison-labeled passage diagnostics, a `k`-sweep
+past `N`, and oracle/random diagnostic controls) that investigates whether
+RAGDefender's inconsistent results come from this saturation, an
+implementation issue, or an evaluation issue.
+
+---
+
+## Defense: FilterRAG
+
+A second, independent defense baseline (`defense/filterrag.py`), based on
+Edemacu et al. (2025): a per-passage statistical filter that scores each
+retrieved passage by keyword "Freq-Density" (query + small-model-generated
+answer keywords vs. the passage's own text) and drops passages above a
+threshold. Unlike RAGDefender's cross-passage clustering, this doesn't rely
+on a clean-cluster anchor, so it's evaluated as a candidate that may be more
+robust to the 100%-poisoned-context case. See
+[`docs/FILTERRAG_BASELINE.md`](docs/FILTERRAG_BASELINE.md) for the
+implementation, its deviations from the published method (a small local
+model substitutes for the paper's LLaMA-2/3 SLM), and how to run its
+diagnostics (`--defense filterrag` / `filterrag_query_only`,
+`--quick_filterrag_hotpotqa`).
+
 ---
 
 ## Supported Models

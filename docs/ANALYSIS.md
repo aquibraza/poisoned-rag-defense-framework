@@ -402,3 +402,5 @@ The fundamental research problem — that LLM-generated fluent disinformation, w
 ---
 
 *Analysis prepared May 2026. Based on paper published in USENIX Security 2025 and experimental results in `results/query_results/main/`.*
+
+**Update:** The threat-model-mismatch hypothesis in §5b and the "test RAGDefender with k > N" recommendation in §7.2/§8 are now being investigated with dedicated tooling — see [`docs/RAGDEFENDER_DIAGNOSTIC_PLAN.md`](RAGDEFENDER_DIAGNOSTIC_PLAN.md).
