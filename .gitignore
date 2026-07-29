@@ -178,11 +178,12 @@ model_configs/*.json
 
 # Large result/data files
 *.zip
-results/beir_results/
-results/adv_targeted_results/
+results/
+# results/beir_results/
+# results/adv_targeted_results/
 
 # RAGDefender generated cluster visualization artifacts
-results/diagnostics/ragdefender_cluster_viz/
+# results/diagnostics/ragdefender_cluster_viz/
 
 # Cursor workspace/project files
 .cursor/
