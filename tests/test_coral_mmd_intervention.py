@@ -28,6 +28,7 @@ import torch
 
 from defense.cluster_normalized_poisoning import recombine_poison_clean, split_poison_clean
 from defense.coral_mmd_intervention import (
+    compute_preservation_metrics,
     coral_pca_transform,
     resolve_subspace_rank,
 )
@@ -146,6 +147,73 @@ class TestCoralPcaRowNorms(unittest.TestCase):
             result = coral_pca_transform(z_poison, z_clean, beta)
             norms = np.linalg.norm(result.z_poison_final, axis=1)
             np.testing.assert_allclose(norms, 1.0, atol=1e-8)
+
+
+# --------------------------------------------------------------------------
+# Test: preservation/displacement metrics
+# --------------------------------------------------------------------------
+
+class TestPreservationMetrics(unittest.TestCase):
+    def setUp(self):
+        self.z_poison = _make_embeddings(20, 5, 48)
+        self.z_clean = _make_embeddings(21, 5, 48)
+
+    def test_shape_and_keys(self):
+        result = coral_pca_transform(self.z_poison, self.z_clean, beta=0.5)
+        metrics = compute_preservation_metrics(self.z_poison, result.z_poison_final)
+        self.assertEqual(metrics.l2_displacements.shape, (5,))
+        self.assertEqual(metrics.original_cosines.shape, (5,))
+        for field in ("mean_l2_displacement", "max_l2_displacement",
+                      "mean_original_cosine", "min_original_cosine"):
+            self.assertTrue(hasattr(metrics, field))
+            self.assertIsInstance(getattr(metrics, field), float)
+
+    def test_beta_zero_is_exact_identity(self):
+        result = coral_pca_transform(self.z_poison, self.z_clean, beta=0.0)
+        metrics = compute_preservation_metrics(self.z_poison, result.z_poison_final)
+        np.testing.assert_allclose(metrics.l2_displacements, 0.0, atol=1e-10)
+        np.testing.assert_allclose(metrics.original_cosines, 1.0, atol=1e-10)
+        self.assertAlmostEqual(metrics.mean_l2_displacement, 0.0, places=8)
+        self.assertAlmostEqual(metrics.max_l2_displacement, 0.0, places=8)
+        self.assertAlmostEqual(metrics.mean_original_cosine, 1.0, places=8)
+        self.assertAlmostEqual(metrics.min_original_cosine, 1.0, places=8)
+
+    def test_finite_across_beta_sweep(self):
+        for beta in BETAS:
+            result = coral_pca_transform(self.z_poison, self.z_clean, beta)
+            metrics = compute_preservation_metrics(self.z_poison, result.z_poison_final)
+            self.assertTrue(np.all(np.isfinite(metrics.l2_displacements)))
+            self.assertTrue(np.all(np.isfinite(metrics.original_cosines)))
+
+    def test_cosine_within_valid_range(self):
+        for beta in BETAS:
+            result = coral_pca_transform(self.z_poison, self.z_clean, beta)
+            metrics = compute_preservation_metrics(self.z_poison, result.z_poison_final)
+            self.assertTrue(np.all(metrics.original_cosines >= -1.0 - 1e-9))
+            self.assertTrue(np.all(metrics.original_cosines <= 1.0 + 1e-9))
+
+    def test_displacement_non_negative(self):
+        for beta in BETAS:
+            result = coral_pca_transform(self.z_poison, self.z_clean, beta)
+            metrics = compute_preservation_metrics(self.z_poison, result.z_poison_final)
+            self.assertTrue(np.all(metrics.l2_displacements >= 0.0))
+
+    def test_displacement_generally_increases_and_cosine_generally_decreases_with_beta(self):
+        mean_displacements = []
+        mean_cosines = []
+        for beta in BETAS:
+            result = coral_pca_transform(self.z_poison, self.z_clean, beta)
+            metrics = compute_preservation_metrics(self.z_poison, result.z_poison_final)
+            mean_displacements.append(metrics.mean_l2_displacement)
+            mean_cosines.append(metrics.mean_original_cosine)
+        # Monotonic non-decreasing/non-increasing trend end-to-end (not
+        # necessarily strictly monotonic at every intermediate step).
+        self.assertLessEqual(mean_displacements[0], mean_displacements[-1])
+        self.assertGreaterEqual(mean_cosines[0], mean_cosines[-1])
+
+    def test_raises_on_shape_mismatch(self):
+        with self.assertRaises(ValueError):
+            compute_preservation_metrics(self.z_poison, self.z_poison[:-1])
 
 
 # --------------------------------------------------------------------------
@@ -354,15 +422,28 @@ class TestEndToEndSmoke(unittest.TestCase):
         for col in ["coral_distance_before", "coral_distance_after", "mmd_distance_before",
                     "mmd_distance_after", "decision_label", "N_adv", "removed_poison", "removed_clean",
                     "residual_poison_fraction", "selected_indices", "top_pair_pp", "top_pair_pc",
-                    "top_pair_cc"]:
+                    "top_pair_cc", "mean_poison_l2_displacement", "max_poison_l2_displacement",
+                    "mean_poison_original_cosine", "min_poison_original_cosine"]:
             self.assertIn(col, sweep.columns)
         self.assertTrue(np.all(np.isfinite(sweep["coral_distance_before"])))
         self.assertTrue(np.all(np.isfinite(sweep["coral_distance_after"])))
         self.assertTrue(np.all(np.isfinite(sweep["mmd_distance_before"])))
         self.assertTrue(np.all(np.isfinite(sweep["mmd_distance_after"])))
+        self.assertTrue(np.all(np.isfinite(sweep["mean_poison_l2_displacement"])))
+        self.assertTrue(np.all(np.isfinite(sweep["max_poison_l2_displacement"])))
+        self.assertTrue(np.all(np.isfinite(sweep["mean_poison_original_cosine"])))
+        self.assertTrue(np.all(np.isfinite(sweep["min_poison_original_cosine"])))
+        self.assertTrue(np.all(sweep["mean_poison_l2_displacement"] >= 0.0))
+        self.assertTrue(np.all(sweep["max_poison_l2_displacement"] >= 0.0))
+        self.assertTrue(np.all(sweep["mean_poison_original_cosine"] <= 1.0 + 1e-9))
+        self.assertTrue(np.all(sweep["min_poison_original_cosine"] >= -1.0 - 1e-9))
 
         beta_zero = sweep[sweep["beta"] == 0.0]
         self.assertTrue(np.allclose(beta_zero["coral_distance_before"], beta_zero["coral_distance_after"]))
+        np.testing.assert_allclose(beta_zero["mean_poison_l2_displacement"], 0.0, atol=1e-8)
+        np.testing.assert_allclose(beta_zero["max_poison_l2_displacement"], 0.0, atol=1e-8)
+        np.testing.assert_allclose(beta_zero["mean_poison_original_cosine"], 1.0, atol=1e-8)
+        np.testing.assert_allclose(beta_zero["min_poison_original_cosine"], 1.0, atol=1e-8)
 
         with open(run_dir / "run_config.json") as f:
             cfg = json.load(f)
@@ -379,6 +460,9 @@ class TestEndToEndSmoke(unittest.TestCase):
         report_text = (run_dir / "CORAL_PCA_REPORT.md").read_text(encoding="utf-8")
         self.assertIn("No GPT/API calls were made", report_text)
         self.assertIn("E1 comparison skipped", report_text)  # e1_output_dir is empty in this test
+        self.assertIn("Perturbation / preservation metrics", report_text)
+        self.assertIn("mean_poison_l2_displacement", report_text)
+        self.assertIn("mean_poison_original_cosine", report_text)
 
     def test_similarity_matrices_saved_when_present(self):
         run_dir = run_script.main([

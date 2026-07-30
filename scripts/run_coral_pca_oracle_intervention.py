@@ -73,7 +73,10 @@ from defense.cluster_normalized_poisoning import (  # noqa: E402
     recombine_poison_clean,
     split_poison_clean,
 )
-from defense.coral_mmd_intervention import coral_pca_transform  # noqa: E402
+from defense.coral_mmd_intervention import (  # noqa: E402
+    compute_preservation_metrics,
+    coral_pca_transform,
+)
 from defense.distribution_metrics import (  # noqa: E402
     DEFAULT_MMD_GAMMA,
     coral_distance_from_gram,
@@ -216,6 +219,8 @@ def process_query(qid: str, rec: Dict, texts: List[str], model, betas: Sequence[
         coral_after = coral_distance_from_gram(g_pp, g_pc, g_cc)
         mmd_after = mmd_rbf_distance_from_gram(g_pp, g_pc, g_cc, gamma=mmd_gamma)
 
+        preservation = compute_preservation_metrics(z_poison, result.z_poison_final)
+
         matrix_path = run_dir / "similarity_matrices" / f"{qid}_beta{beta}_M.npy"
         np.save(matrix_path, sim_after)
         manifest["matrices"].append(str(matrix_path.relative_to(run_dir)))
@@ -227,6 +232,10 @@ def process_query(qid: str, rec: Dict, texts: List[str], model, betas: Sequence[
             "coral_distance_reduction": coral_before - coral_after,
             "mmd_distance_before": mmd_before, "mmd_distance_after": mmd_after,
             "mmd_distance_reduction": mmd_before - mmd_after,
+            "mean_poison_l2_displacement": preservation.mean_l2_displacement,
+            "max_poison_l2_displacement": preservation.max_l2_displacement,
+            "mean_poison_original_cosine": preservation.mean_original_cosine,
+            "min_poison_original_cosine": preservation.min_original_cosine,
             **row,
             "decision_label": label,
         })
@@ -398,6 +407,50 @@ def render_report(tested_ids: Sequence[str], excluded: Dict[str, str], sweep_df:
             f"{r['residual_poison_fraction']} | {r['decision_label']} |"
         )
     lines.append("")
+
+    lines += [
+        "## Perturbation / preservation metrics",
+        "",
+        "How far CORAL-PCA moves each query's poison embeddings away from their "
+        "original (untransformed) position, and how well the original direction is "
+        "preserved, as `beta` increases. Both the original and transformed poison "
+        "embeddings are L2-normalized before these are computed (the same "
+        "unit-sphere representation RAGDefender's cosine-similarity decision "
+        "operates on), so `beta=0.0` gives **exact** identity "
+        "(`mean/max_poison_l2_displacement == 0.0`, `mean/min_poison_original_cosine == 1.0`) "
+        "-- see `defense/coral_mmd_intervention.py::compute_preservation_metrics`. "
+        "These are the metrics that make CORAL-PCA comparable, on perturbation "
+        "magnitude, to E1, later ridge-CORAL, and MMD.",
+        "",
+        "| query_id | beta | mean_poison_l2_displacement | max_poison_l2_displacement | "
+        "mean_poison_original_cosine | min_poison_original_cosine |",
+        "|---|---|---|---|---|---|",
+    ]
+    for _, r in sweep_df.sort_values(["query_id", "beta"]).iterrows():
+        lines.append(
+            f"| `{r['query_id']}` | {r['beta']} | {r['mean_poison_l2_displacement']:.4f} | "
+            f"{r['max_poison_l2_displacement']:.4f} | {r['mean_poison_original_cosine']:.4f} | "
+            f"{r['min_poison_original_cosine']:.4f} |"
+        )
+    lines.append("")
+    beta_max = max(betas)
+    beta_max_rows = sweep_df[sweep_df["beta"] == beta_max]
+    if not beta_max_rows.empty:
+        lines.append(
+            f"At `beta={beta_max}` (maximum swept perturbation) across the {len(beta_max_rows)} "
+            f"tested queries: `mean_poison_l2_displacement` ranges "
+            f"[{beta_max_rows['mean_poison_l2_displacement'].min():.4f}, "
+            f"{beta_max_rows['mean_poison_l2_displacement'].max():.4f}], "
+            f"`max_poison_l2_displacement` ranges "
+            f"[{beta_max_rows['max_poison_l2_displacement'].min():.4f}, "
+            f"{beta_max_rows['max_poison_l2_displacement'].max():.4f}], and "
+            f"`mean_poison_original_cosine` ranges "
+            f"[{beta_max_rows['mean_poison_original_cosine'].min():.4f}, "
+            f"{beta_max_rows['mean_poison_original_cosine'].max():.4f}] -- see the per-query "
+            "summary and the E1 comparison below for how this perturbation magnitude relates to "
+            "RAGDefender's decision outcome."
+        )
+        lines.append("")
 
     lines += [
         "## Per-query summary: first beta (ascending from 0.0) causing residual-poison failure",
