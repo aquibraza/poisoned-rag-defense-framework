@@ -184,6 +184,8 @@ results/
 
 # RAGDefender generated cluster visualization artifacts
 # results/diagnostics/ragdefender_cluster_viz/
+# results/diagnostics/cluster_normalized_poisoning/
+# results/diagnostics/cluster_normalized_poisoning_formal/
 
 # Cursor workspace/project files
 .cursor/
