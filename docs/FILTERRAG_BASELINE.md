@@ -6,6 +6,15 @@
 > This adds a second, independent defense family to compare against
 > RAGDefender -- see [docs/ANALYSIS.md](ANALYSIS.md) §5c for the published
 > numbers that motivated adding it.
+>
+> See [docs/FILTERRAG_FIDELITY_AUDIT.md](FILTERRAG_FIDELITY_AUDIT.md) for a
+> detailed item-by-item audit against the paper's Algorithm 1, done prior to
+> starting ML-FilterRAG. That audit found and fixed one load-bearing
+> deviation not previously called out below: the keyword/passage-word
+> matching inside Freq-Density was exact-token matching only, not the
+> paper's semantic (cosine-similarity) word matching. `--filterrag_matching_mode
+> semantic` (§2/§3 below) now implements the paper-faithful version;
+> `exact` remains the default for backward compatibility.
 
 ## 1. What FilterRAG is
 
@@ -45,15 +54,30 @@ work" below.
 ## 2. What's implemented in this repo
 
 - `defense/filterrag.py`:
-  - `freq_density(passage_text, keywords)` -- the pure scoring function,
-    fully deterministic and dependency-free.
-  - `score_passages(query, passages, slm_answer_fn=...)` -- per-passage score
-    breakdown (`doc_id`, `freq_density_score`, `slm_answer`).
-  - `filterrag_defense(query, passages, epsilon=..., slm_answer_fn=...)` --
-    applies the `epsilon` threshold and returns `(kept_passages, diag_extra)`
+  - `freq_density(passage_text, keywords, matching_mode=..., semantic_threshold=..., semantic_matcher=...)`
+    -- the pure scoring function; `matching_mode="exact"` (default) is
+    dependency-free and byte-identical to the original implementation,
+    `matching_mode="semantic"` requires a `SemanticWordMatcher` (lazily
+    loaded on first use). Thin wrapper around `freq_density_detailed()`.
+  - `freq_density_detailed(...)` -- same inputs, returns the full breakdown
+    dict (`freq_density_score`, `unique_word_count`, `matched_keyword_count`,
+    `matched_keywords`, `matching_mode`, `semantic_threshold`).
+  - `score_passages(query, passages, slm_answer_fn=..., matching_mode=..., semantic_threshold=..., semantic_matcher=...)`
+    -- per-passage score breakdown: `doc_id`, `freq_density_score`,
+    `slm_answer` (unchanged keys) plus `matching_mode`, `semantic_threshold`,
+    `unique_word_count`, `matched_keyword_count`, `matched_keywords_sample`
+    (capped list, avoids huge diagnostic output).
+  - `filterrag_defense(query, passages, epsilon=..., slm_answer_fn=..., matching_mode=..., semantic_threshold=..., semantic_matcher=...)`
+    -- applies the `epsilon` threshold and returns `(kept_passages, diag_extra)`
     in the same shape every other defense in `defense/dispatch.py` returns,
     so it plugs into the existing diagnostics pipeline
     (`defense/diagnostics.py`) unchanged.
+  - `SemanticWordMatcher` / `get_semantic_word_matcher(model_name=...)` --
+    word-level cosine-similarity matcher backed by
+    `sentence-transformers/all-MiniLM-L6-v2` (paper default, Section
+    IV-B2), lazy-loaded and cached (both the HF model and per-word
+    embeddings), used only when `matching_mode="semantic"`. See
+    `docs/FILTERRAG_FIDELITY_AUDIT.md` §4.
   - `local_hf_slm_answer_fn(model_name=..., max_new_tokens=..., device=...)` --
     builds an `SlmAnswerFn` backed by a small local HuggingFace seq2seq model
     (lazy import + lazy load + cached, so importing `defense.filterrag`
@@ -73,9 +97,36 @@ work" below.
     under-perform `filterrag` (higher residual poison / worse recall on
     passages that paraphrase the question).
 - `main.py`: `--filterrag_epsilon` (default 0.2, matching the paper),
-  `--filterrag_slm_model` (default `google/flan-t5-small`), and
-  `--filterrag_slm_device` (`auto`/`cpu`/`mps`/`cuda`, default `auto`) CLI
-  flags, wired straight through to `run_defense()`.
+  `--filterrag_slm_model` (default `google/flan-t5-small`),
+  `--filterrag_slm_device` (`auto`/`cpu`/`mps`/`cuda`, default `auto`),
+  `--filterrag_matching_mode` (`exact`/`semantic`, default `exact` -- see
+  §2.1 below), and `--filterrag_semantic_threshold` (default 0.6, matching
+  the paper) CLI flags, wired straight through to `run_defense()`.
+
+### 2.1 Matching mode: `exact` (default) vs. `semantic` (paper-faithful)
+
+`--filterrag_matching_mode` controls how Freq-Density decides whether a
+keyword (from `query ⊕ SLM_answer`) "matches" a word in the passage:
+
+- `exact` (default): verbatim, case-folded string equality. This is the
+  original implementation's behavior, unchanged, kept as the default so
+  existing scripts/diagnostics runs (`scripts/filterrag_score_inspection.py`,
+  `scripts/run_ragdefender_k_sweep.py`) are unaffected. **Not
+  paper-faithful** -- see `docs/FILTERRAG_FIDELITY_AUDIT.md` §3.2: this is
+  equivalent to the paper's own similarity-threshold ablation at
+  threshold=1.0, the worst-performing setting in their Table II.
+- `semantic`: cosine similarity of `sentence-transformers/all-MiniLM-L6-v2`
+  word embeddings, thresholded by `--filterrag_semantic_threshold` (default
+  0.6). This matches the paper's Section IV-B2 default exactly. Use this
+  for paper-fidelity runs: `--filterrag_matching_mode semantic`.
+  `sentence_transformers` is imported lazily -- only when this mode is
+  actually exercised, same convention as `transformers`/`torch` for the SLM
+  backend.
+
+Both modes apply identically to `filterrag` and `filterrag_query_only`
+(matching mode and SLM-vs-query-only-keywords are orthogonal); neither
+makes `filterrag_query_only` paper-faithful, since that mode always skips
+the SLM step regardless of matching mode.
 - `scripts/run_ragdefender_k_sweep.py`: `filterrag`/`filterrag_query_only`
   added to `ALL_DEFENSE_CHOICES`; a `--quick_filterrag_hotpotqa` preset
   mirroring `--quick_hotpotqa` (same HotpotQA/max_queries=10/N=5/k=[5,10])
@@ -149,6 +200,15 @@ work" below.
   before spending any time/compute on the SLM-backed `filterrag` mode -- the
   same "cheap diagnostics before expensive runs" pattern used throughout
   `docs/RAGDEFENDER_DIAGNOSTIC_PLAN.md`.
+- **Keyword/passage-word matching defaults to `exact`, not the paper's
+  `semantic`** (§2.1 above; found and fixed by
+  `docs/FILTERRAG_FIDELITY_AUDIT.md`): the paper's Freq-Density intersection
+  `(qi⊕aj) ∩ dj` is defined as a cosine-similarity match
+  (`all-MiniLM-L6-v2`, threshold 0.6), not literal string equality.
+  `--filterrag_matching_mode semantic` now implements this faithfully; the
+  default stays `exact` for backward compatibility with runs/scripts
+  written before this option existed, so paper-fidelity runs must opt in
+  explicitly.
 - **ML-FilterRAG is out of scope** (see "Deferred work").
 - **Epsilon is not re-tuned for `flan-t5-small`**: the paper's `epsilon=0.2`
   was presumably tuned against LLaMA-2/3-generated `SLM_answer` text; with a

@@ -6,8 +6,11 @@ Paper algorithm, per retrieved passage `d` for query `q`:
 
 1. Generate `SLM_answer` -- an answer to `q` produced by a *small* language
    model conditioned on `d` alone (not the full retrieved context).
-2. `Freq-Density(d) = sum(freq(w, d) for w in (q ⊕ SLM_answer) if w in d)
-   / UniqueWords(d)`.
+2. `Freq-Density(d) = sum(freq(w, d) for w in (q ⊕ SLM_answer) ∩ d) /
+   UniqueWords(d)`, where `∩` is a *semantic* word-similarity match (cosine
+   similarity of sentence-transformer word embeddings >= a threshold, paper
+   default 0.6 on `all-MiniLM-L6-v2`; see `matching_mode="semantic"` below),
+   not literal string equality.
 3. Drop `d` if `Freq-Density(d) >= epsilon` (paper default epsilon = 0.2).
 
 Rationale: PoisonedRAG-style adversarial passages are deliberately stuffed
@@ -20,7 +23,8 @@ docs/ANALYSIS.md and docs/RAGDEFENDER_DIAGNOSTIC_PLAN.md for why that
 saturation case breaks RAGDefender).
 
 Known deviations from the published method in this implementation (see
-docs/FILTERRAG_BASELINE.md for the full writeup):
+docs/FILTERRAG_FIDELITY_AUDIT.md for the full audit and
+docs/FILTERRAG_BASELINE.md for the broader baseline writeup):
 
 - The paper uses LLaMA-2/3 as the SLM. This repo has no CUDA/NVIDIA GPU
   available, so `local_hf_slm_answer_fn()` defaults to a much smaller
@@ -30,16 +34,31 @@ docs/FILTERRAG_BASELINE.md for the full writeup):
   later. Device placement is automatic (`resolve_slm_device`): Apple Silicon
   Metal/MPS is used when available, else CUDA, else CPU -- see
   `--filterrag_slm_device` in main.py to override.
+- `matching_mode="exact"` (the default, for backward compatibility with
+  existing diagnostics/scripts) matches keywords to passage words by
+  verbatim (case-folded) string equality, which is equivalent to the
+  paper's own similarity-threshold ablation at threshold=1.0 -- the
+  *worst*-performing setting the paper reports (Table II), since it lets
+  an attacker evade detection with a synonym or word-form change. Pass
+  `matching_mode="semantic"` (`--filterrag_matching_mode semantic` at the
+  CLI) for the paper-faithful default: cosine-similarity word matching via
+  `sentence-transformers/all-MiniLM-L6-v2`, threshold 0.6
+  (`DEFAULT_SEMANTIC_THRESHOLD` / `--filterrag_semantic_threshold`). See
+  docs/FILTERRAG_FIDELITY_AUDIT.md §3.2/§4 for the full writeup of this
+  deviation and why `exact` is *not* promoted to the default here.
 - `filterrag_query_only` mode (`slm_answer_fn=None`) is a diagnostic
   ablation, not in the paper: it scores passages using only the query's own
   keywords, skipping the SLM step entirely. This is useful as a fast,
   fully-offline correctness check and cost-free diagnostic baseline, but it
   is *not* the full published algorithm and is expected to be weaker,
   since it can't catch passages stuffed with the *answer* but not much of
-  the question text.
+  the question text. This is orthogonal to `matching_mode` -- `query_only`
+  can use either `exact` or `semantic` matching, but neither makes it
+  paper-faithful, since the SLM step is still skipped entirely.
 - ML-FilterRAG (Freq-Density + perplexity + log-probability -> trained
   classifier) is out of scope here; only threshold-based FilterRAG is
-  implemented. See docs/FILTERRAG_BASELINE.md.
+  implemented. See docs/FILTERRAG_BASELINE.md and
+  docs/FILTERRAG_FIDELITY_AUDIT.md §5.
 """
 from __future__ import annotations
 
@@ -52,6 +71,14 @@ from defense.passages import RetrievedPassage
 DEFAULT_EPSILON = 0.2
 DEFAULT_SLM_MODEL = "google/flan-t5-small"
 
+# Paper Section IV-B2: "we employ a huggingface sentence transformer and set
+# a default similarity threshold value of 0.6 for cosine similarity", footnoted
+# as https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2.
+DEFAULT_SEMANTIC_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+DEFAULT_SEMANTIC_THRESHOLD = 0.6
+
+VALID_MATCHING_MODES = ("exact", "semantic")
+
 _WORD_RE = re.compile(r"[a-z0-9']+")
 
 # (question, passage_text) -> generated answer text, or None on failure.
@@ -62,22 +89,125 @@ def _tokenize(text: Optional[str]) -> List[str]:
     return _WORD_RE.findall((text or "").lower())
 
 
-def freq_density(passage_text: str, keywords: Sequence[str]) -> float:
-    """Freq-Density(d) = sum(freq(w, d) for w in keywords if w in d) / UniqueWords(d).
+def _validate_matching_mode(matching_mode: str) -> None:
+    if matching_mode not in VALID_MATCHING_MODES:
+        raise ValueError(
+            f"Unknown filterrag matching_mode {matching_mode!r}; expected one of {VALID_MATCHING_MODES}"
+        )
+
+
+def freq_density_detailed(
+    passage_text: str,
+    keywords: Sequence[str],
+    *,
+    matching_mode: str = "exact",
+    semantic_threshold: float = DEFAULT_SEMANTIC_THRESHOLD,
+    semantic_matcher: Optional["SemanticWordMatcher"] = None,
+) -> Dict:
+    """Compute Freq-Density plus the full per-passage match breakdown.
+
+    `Freq-Density(d) = sum(freq(w, d) for w in matched_doc_words) /
+    UniqueWords(d)`, where `matched_doc_words` is the set of unique words in
+    `d` that match at least one keyword in `keywords` (typically the token
+    set of `query ⊕ SLM_answer`):
+
+    - `matching_mode="exact"` (default, legacy/backward-compatible): a
+      passage word matches a keyword iff they are string-equal
+      (case-folded). Equivalent to the paper's own similarity-threshold
+      ablation at threshold=1.0 -- see module docstring and
+      docs/FILTERRAG_FIDELITY_AUDIT.md.
+    - `matching_mode="semantic"` (paper-faithful, Section IV-B2): a passage
+      word matches a keyword iff the cosine similarity of their
+      `sentence-transformers/all-MiniLM-L6-v2` embeddings (or
+      `semantic_matcher`'s model, if a custom one is supplied) is
+      `>= semantic_threshold` (paper default 0.6). `semantic_matcher`
+      defaults to a lazily-loaded, module-cached `SemanticWordMatcher` (see
+      `get_semantic_word_matcher()`) -- `sentence_transformers` is only
+      ever imported the first time this path actually runs.
+
+    Returns a dict with keys `freq_density_score`, `unique_word_count`,
+    `matched_keyword_count`, `matched_keywords` (the *keywords* -- not
+    passage words -- that had at least one match; deduplicated, not
+    capped here, callers may cap for display), `matching_mode`, and
+    `semantic_threshold` (`None` when `matching_mode="exact"`, since the
+    threshold is meaningless there).
+
+    Returns an all-zero/empty breakdown for a passage with no tokens at all,
+    or an empty `keywords` sequence (avoids a division-by-zero; there's no
+    lexical evidence either way).
+    """
+    _validate_matching_mode(matching_mode)
+    doc_tokens = _tokenize(passage_text)
+    doc_counts = Counter(doc_tokens)
+    unique_word_count = len(doc_counts)
+    # Sorted for deterministic output (matched_keywords order, cache-friendly
+    # embedding batches) -- does not affect the score itself.
+    keyword_list = sorted({k.lower() for k in keywords})
+
+    if unique_word_count == 0 or not keyword_list:
+        return {
+            "freq_density_score": 0.0,
+            "unique_word_count": unique_word_count,
+            "matched_keyword_count": 0,
+            "matched_keywords": [],
+            "matching_mode": matching_mode,
+            "semantic_threshold": semantic_threshold if matching_mode == "semantic" else None,
+        }
+
+    if matching_mode == "exact":
+        matched_keywords = [k for k in keyword_list if k in doc_counts]
+        total_freq = sum(doc_counts[k] for k in matched_keywords)
+    else:  # "semantic"
+        matcher = semantic_matcher if semantic_matcher is not None else get_semantic_word_matcher()
+        doc_words = list(doc_counts.keys())
+        sims = matcher.similarity_matrix(doc_words, keyword_list)
+        matched_keyword_idx = set()
+        total_freq = 0
+        for i, w in enumerate(doc_words):
+            hit_idx = [j for j, s in enumerate(sims[i]) if s >= semantic_threshold]
+            if hit_idx:
+                total_freq += doc_counts[w]
+                matched_keyword_idx.update(hit_idx)
+        matched_keywords = [keyword_list[j] for j in sorted(matched_keyword_idx)]
+
+    return {
+        "freq_density_score": total_freq / unique_word_count,
+        "unique_word_count": unique_word_count,
+        "matched_keyword_count": len(matched_keywords),
+        "matched_keywords": matched_keywords,
+        "matching_mode": matching_mode,
+        "semantic_threshold": semantic_threshold if matching_mode == "semantic" else None,
+    }
+
+
+def freq_density(
+    passage_text: str,
+    keywords: Sequence[str],
+    *,
+    matching_mode: str = "exact",
+    semantic_threshold: float = DEFAULT_SEMANTIC_THRESHOLD,
+    semantic_matcher: Optional["SemanticWordMatcher"] = None,
+) -> float:
+    """Freq-Density(d) = sum(freq(w, d) for w in keywords if w "matches" d)
+    / UniqueWords(d). Thin wrapper around `freq_density_detailed()` that
+    returns just the score, preserved for backward compatibility with
+    existing callers (e.g. `scripts/filterrag_score_inspection.py`) that
+    only need the float. See `freq_density_detailed()` for the full
+    per-passage match breakdown (matched keyword count/list, matching mode,
+    etc.) and for `matching_mode` semantics.
 
     `keywords` is typically the token set of (query ⊕ SLM_answer); duplicate
     keywords are harmless (deduplicated internally, matching the paper's set
     union `∩`/`⊕` notation). Returns 0.0 for a passage with no tokens at all
     (avoids a division-by-zero; there's no lexical evidence either way).
     """
-    doc_tokens = _tokenize(passage_text)
-    unique_word_count = len(set(doc_tokens))
-    if unique_word_count == 0:
-        return 0.0
-    doc_counts = Counter(doc_tokens)
-    keyword_set = {k.lower() for k in keywords}
-    total_freq = sum(doc_counts[w] for w in keyword_set if w in doc_counts)
-    return total_freq / unique_word_count
+    return freq_density_detailed(
+        passage_text,
+        keywords,
+        matching_mode=matching_mode,
+        semantic_threshold=semantic_threshold,
+        semantic_matcher=semantic_matcher,
+    )["freq_density_score"]
 
 
 def score_passages(
@@ -85,6 +215,10 @@ def score_passages(
     passages: Sequence[RetrievedPassage],
     *,
     slm_answer_fn: Optional[SlmAnswerFn] = None,
+    matching_mode: str = "exact",
+    semantic_threshold: float = DEFAULT_SEMANTIC_THRESHOLD,
+    semantic_matcher: Optional["SemanticWordMatcher"] = None,
+    matched_keywords_sample_limit: int = 20,
 ) -> List[Dict]:
     """Compute a Freq-Density score (plus supporting detail) per passage.
 
@@ -92,16 +226,48 @@ def score_passages(
     `filterrag_query_only` diagnostic ablation -- see module docstring).
     Otherwise keywords = tokenize(query) ∪ tokenize(slm_answer_fn(query,
     passage_text)), matching the paper's (query ⊕ SLM_answer) term.
+
+    `matching_mode`/`semantic_threshold`/`semantic_matcher` are forwarded to
+    `freq_density_detailed()` -- see there for `matching_mode` semantics.
+    When `matching_mode="semantic"` and no `semantic_matcher` is supplied, a
+    module-cached `SemanticWordMatcher` is lazily created (one HF model
+    load, reused across all passages/queries in this process -- see
+    `get_semantic_word_matcher()`); `sentence_transformers` is never
+    imported for `matching_mode="exact"` (the default).
+
+    Each returned dict has: `doc_id`, `freq_density_score`, `slm_answer`
+    (all pre-existing, unchanged), plus `matching_mode`, `semantic_threshold`
+    (`None` for exact mode), `unique_word_count`, `matched_keyword_count`,
+    and `matched_keywords_sample` (the matched keywords, truncated to
+    `matched_keywords_sample_limit` entries so a passage with many matches
+    doesn't blow up diagnostic output size -- `matched_keyword_count` is
+    always the *full*, uncapped count).
     """
+    _validate_matching_mode(matching_mode)
+    if matching_mode == "semantic" and semantic_matcher is None:
+        semantic_matcher = get_semantic_word_matcher()
+
     query_tokens = _tokenize(query)
     scores: List[Dict] = []
     for p in passages:
         slm_answer = slm_answer_fn(query, p.text) if slm_answer_fn is not None else None
         keywords = list(query_tokens) + (_tokenize(slm_answer) if slm_answer else [])
+        detail = freq_density_detailed(
+            p.text,
+            keywords,
+            matching_mode=matching_mode,
+            semantic_threshold=semantic_threshold,
+            semantic_matcher=semantic_matcher,
+        )
         scores.append({
             "doc_id": p.doc_id,
-            "freq_density_score": freq_density(p.text, keywords),
+            "freq_density_score": detail["freq_density_score"],
             "slm_answer": slm_answer,
+            "matching_mode": detail["matching_mode"],
+            "semantic_threshold": detail["semantic_threshold"],
+            "unique_word_count": detail["unique_word_count"],
+            "matched_keyword_count": detail["matched_keyword_count"],
+            "matched_keywords_sample": detail["matched_keywords"][:matched_keywords_sample_limit],
         })
     return scores
 
@@ -112,6 +278,9 @@ def filterrag_defense(
     *,
     epsilon: float = DEFAULT_EPSILON,
     slm_answer_fn: Optional[SlmAnswerFn] = None,
+    matching_mode: str = "exact",
+    semantic_threshold: float = DEFAULT_SEMANTIC_THRESHOLD,
+    semantic_matcher: Optional["SemanticWordMatcher"] = None,
 ) -> Tuple[List[RetrievedPassage], Dict]:
     """Apply FilterRAG: drop every passage with Freq-Density >= epsilon.
 
@@ -119,27 +288,136 @@ def filterrag_defense(
     defense in defense/dispatch.py returns, so it plugs into the existing
     diagnostics pipeline (defense/diagnostics.py) unchanged.
 
+    `matching_mode="exact"` (default) preserves the original, backward
+    compatible behavior; `matching_mode="semantic"` is the paper-faithful
+    mode (cosine similarity of `all-MiniLM-L6-v2` word embeddings, default
+    threshold 0.6) -- see module docstring and
+    docs/FILTERRAG_FIDELITY_AUDIT.md.
+
     `diag_extra["N_adv_estimated_by_ragdefender"]` is repo-wide diagnostic
     schema field name (shared across all defenses, not RAGDefender-specific
     despite the name -- see defense/diagnostics.py); here it is FilterRAG's
     own count of passages it flagged as adversarial. `diag_extra["notes"]`
-    records the epsilon and SLM-vs-query-only mode used, and
-    `diag_extra["filterrag_scores"]` carries the full per-passage score
-    breakdown (doc_id, freq_density_score, slm_answer) for deeper analysis
-    beyond what the per-query diagnostic schema captures.
+    records the epsilon, SLM-vs-query-only mode, and matching mode
+    (+ threshold, if semantic) used, and `diag_extra["filterrag_scores"]`
+    carries the full per-passage score breakdown (see `score_passages()`)
+    for deeper analysis beyond what the per-query diagnostic schema
+    captures.
     """
-    scores = score_passages(query, passages, slm_answer_fn=slm_answer_fn)
+    scores = score_passages(
+        query,
+        passages,
+        slm_answer_fn=slm_answer_fn,
+        matching_mode=matching_mode,
+        semantic_threshold=semantic_threshold,
+        semantic_matcher=semantic_matcher,
+    )
     score_by_doc_id = {s["doc_id"]: s["freq_density_score"] for s in scores}
     removed_doc_ids = {doc_id for doc_id, score in score_by_doc_id.items() if score >= epsilon}
     kept = [p for p in passages if p.doc_id not in removed_doc_ids]
 
     mode = "slm" if slm_answer_fn is not None else "query_only_ablation"
+    notes = f"filterrag mode={mode} epsilon={epsilon} matching_mode={matching_mode}"
+    if matching_mode == "semantic":
+        notes += f" semantic_threshold={semantic_threshold}"
     diag_extra = {
         "N_adv_estimated_by_ragdefender": len(removed_doc_ids),
         "filterrag_scores": scores,
-        "notes": f"filterrag mode={mode} epsilon={epsilon}",
+        "notes": notes,
     }
     return kept, diag_extra
+
+
+# ---------------------------------------------------------------------------
+# Semantic word matcher: sentence-transformers/all-MiniLM-L6-v2 (lazy-loaded).
+#
+# Only used by matching_mode="semantic" (see freq_density_detailed()). None
+# of this module's top-level imports pull in `sentence_transformers` --
+# `import defense.filterrag` stays free of that dependency (and of `torch`)
+# unless semantic matching is actually exercised, matching this file's
+# existing lazy-import convention for the SLM backend below.
+# ---------------------------------------------------------------------------
+
+
+def _cosine_similarity_matrix(embeddings_a: Sequence[Sequence[float]], embeddings_b: Sequence[Sequence[float]]):
+    """Pairwise cosine similarity matrix between two lists of equal-length
+    numeric vectors, shape (len(embeddings_a), len(embeddings_b)).
+
+    Implemented with plain `numpy` (already a hard dependency of this repo,
+    e.g. `main.py`) rather than `sentence_transformers.util.cos_sim`/`torch`,
+    so the similarity math itself has no `torch` dependency -- only loading
+    the embedding *model* does (see `SemanticWordMatcher._ensure_model()`).
+    This also makes `SemanticWordMatcher` trivially mockable in tests: a
+    fake matcher just needs to return plain nested lists/arrays from
+    `similarity_matrix()`, no `torch`/`sentence_transformers` involved.
+    """
+    import numpy as np  # noqa: PLC0415 -- keep numpy off this module's import path too
+
+    a = np.asarray(embeddings_a, dtype=float)
+    b = np.asarray(embeddings_b, dtype=float)
+    a_norm = a / (np.linalg.norm(a, axis=1, keepdims=True) + 1e-12)
+    b_norm = b / (np.linalg.norm(b, axis=1, keepdims=True) + 1e-12)
+    return a_norm @ b_norm.T
+
+
+class SemanticWordMatcher:
+    """Word-level cosine-similarity matcher backed by a HuggingFace sentence
+    transformer (paper default: `sentence-transformers/all-MiniLM-L6-v2`,
+    Section IV-B2).
+
+    The underlying `SentenceTransformer` model is loaded lazily -- only on
+    the first call to `similarity_matrix()` -- and per-word embeddings are
+    cached (words repeat heavily across queries/passages within a run:
+    common English words, repeated query tokens), so repeated calls don't
+    re-embed the same word. Construct via `get_semantic_word_matcher()` for
+    the module-level cached instance; construct directly only for tests
+    (e.g. to swap in a fake `_ensure_model`) or to use a non-default model.
+    """
+
+    def __init__(self, model_name: str = DEFAULT_SEMANTIC_MODEL):
+        self.model_name = model_name
+        self._model = None
+        self._embedding_cache: Dict[str, object] = {}
+
+    def _ensure_model(self):
+        if self._model is None:
+            from sentence_transformers import SentenceTransformer  # noqa: PLC0415 -- intentional lazy import
+            self._model = SentenceTransformer(self.model_name)
+        return self._model
+
+    def _embed(self, words: Sequence[str]):
+        import numpy as np  # noqa: PLC0415
+
+        uncached = [w for w in words if w not in self._embedding_cache]
+        if uncached:
+            model = self._ensure_model()
+            vectors = model.encode(list(uncached), convert_to_numpy=True)
+            for w, v in zip(uncached, vectors):
+                self._embedding_cache[w] = v
+        return np.stack([self._embedding_cache[w] for w in words])
+
+    def similarity_matrix(self, words_a: Sequence[str], words_b: Sequence[str]):
+        """Return the (len(words_a), len(words_b)) cosine similarity matrix
+        between the embeddings of `words_a` and `words_b`."""
+        import numpy as np  # noqa: PLC0415
+
+        if not words_a or not words_b:
+            return np.zeros((len(words_a), len(words_b)))
+        emb_a = self._embed(words_a)
+        emb_b = self._embed(words_b)
+        return _cosine_similarity_matrix(emb_a, emb_b)
+
+
+_SEMANTIC_MATCHER_CACHE: Dict[str, SemanticWordMatcher] = {}
+
+
+def get_semantic_word_matcher(model_name: str = DEFAULT_SEMANTIC_MODEL) -> SemanticWordMatcher:
+    """Return a process-wide cached `SemanticWordMatcher` for `model_name`,
+    creating it (but not yet loading the HF model -- that happens lazily on
+    first `similarity_matrix()` call) if it doesn't exist yet."""
+    if model_name not in _SEMANTIC_MATCHER_CACHE:
+        _SEMANTIC_MATCHER_CACHE[model_name] = SemanticWordMatcher(model_name)
+    return _SEMANTIC_MATCHER_CACHE[model_name]
 
 
 # ---------------------------------------------------------------------------

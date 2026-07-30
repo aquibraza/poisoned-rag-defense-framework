@@ -20,7 +20,23 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import torch
 
 from defense import defense_runner, dispatch
+from defense import filterrag as filterrag_module
 from defense.passages import count_poison_clean, label_passages
+
+
+class FakeSemanticMatcher:
+    """Dependency-free test double for `SemanticWordMatcher`, mirroring
+    `tests/test_filterrag.py`'s helper of the same name -- duplicated here
+    (rather than imported) so this file stays self-contained, matching the
+    existing `FakeSentenceTransformer` convention in this file."""
+
+    def __init__(self, similarities):
+        self.similarities = similarities
+        self.call_count = 0
+
+    def similarity_matrix(self, words_a, words_b):
+        self.call_count += 1
+        return [[self.similarities.get((wa, wb), 0.0) for wb in words_b] for wa in words_a]
 
 
 class FakeSentenceTransformer:
@@ -185,6 +201,60 @@ class TestFilterragQueryOnlyThroughDispatch(unittest.TestCase):
             "filterrag_query_only", "Where is texas?", passages, "hotpotqa", filterrag_epsilon=1000.0
         )
         self.assertEqual(len(kept), len(passages))  # nothing crosses an impossibly high threshold
+
+
+class TestFilterragMatchingModeThroughDispatch(unittest.TestCase):
+    """--filterrag_matching_mode/--filterrag_semantic_threshold (main.py) ->
+    filterrag_matching_mode/filterrag_semantic_threshold (dispatch.run_defense)
+    are correctly forwarded into defense/filterrag.py, for both
+    filterrag_query_only and (mocked-SLM) filterrag. No real
+    sentence_transformers model is loaded -- `get_semantic_word_matcher` is
+    monkeypatched with `FakeSemanticMatcher`, so this needs no network
+    access and makes no LLM/GPT/API call."""
+
+    def _passages(self):
+        raw = [
+            {"doc_id": "clean1", "context": "Some unrelated clean fact about the world.", "score": 0.9, "source": "corpus", "is_poison": False},
+            {"doc_id": "adv1", "context": "automobile automobile automobile automobile is the thing automobile automobile.", "score": 0.85, "source": "adversarial", "is_poison": True},
+        ]
+        return label_passages(raw)
+
+    def test_matching_mode_and_threshold_forwarded_to_filterrag_query_only(self):
+        fake_matcher = FakeSemanticMatcher({("automobile", "sedan"): 0.85})
+        with mock.patch.object(filterrag_module, "get_semantic_word_matcher", return_value=fake_matcher):
+            kept, diag = dispatch.run_defense(
+                "filterrag_query_only", "What powers my sedan?", self._passages(), "hotpotqa",
+                filterrag_matching_mode="semantic", filterrag_semantic_threshold=0.6,
+            )
+        self.assertNotIn("adv1", {p.doc_id for p in kept})  # only catchable via the synonym match
+        self.assertIn("matching_mode=semantic", diag["notes"])
+        self.assertIn("semantic_threshold=0.6", diag["notes"])
+        for s in diag["filterrag_scores"]:
+            self.assertEqual(s["matching_mode"], "semantic")
+            self.assertIsNone(s["slm_answer"])  # query_only never calls an SLM
+
+    def test_exact_matching_mode_is_still_the_dispatch_default(self):
+        kept, diag = dispatch.run_defense(
+            "filterrag_query_only", "What powers my sedan?", self._passages(), "hotpotqa",
+        )
+        self.assertIn("adv1", {p.doc_id for p in kept})  # no verbatim overlap -> exact mode can't catch it
+        self.assertIn("matching_mode=exact", diag["notes"])
+
+    def test_matching_mode_forwarded_to_full_filterrag_mode(self):
+        """--defense filterrag (SLM mode) also respects filterrag_matching_mode;
+        local_hf_slm_answer_fn is mocked so no HF model is downloaded/loaded."""
+        fake_matcher = FakeSemanticMatcher({("automobile", "sedan"): 0.85})
+        with mock.patch.object(dispatch, "local_hf_slm_answer_fn", return_value=lambda q, p: "an answer"), \
+             mock.patch.object(filterrag_module, "get_semantic_word_matcher", return_value=fake_matcher):
+            kept, diag = dispatch.run_defense(
+                "filterrag", "What powers my sedan?", self._passages(), "hotpotqa",
+                filterrag_matching_mode="semantic", filterrag_semantic_threshold=0.42,
+            )
+        self.assertIn("mode=slm", diag["notes"])
+        self.assertIn("matching_mode=semantic", diag["notes"])
+        self.assertIn("semantic_threshold=0.42", diag["notes"])
+        for s in diag["filterrag_scores"]:
+            self.assertEqual(s["slm_answer"], "an answer")  # SLM step actually ran
 
 
 class TestUnknownDefenseRaises(unittest.TestCase):

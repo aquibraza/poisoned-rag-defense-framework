@@ -18,6 +18,8 @@ import torch
 
 from defense.dispatch import DEFENSE_CHOICES, run_defense
 from defense.filterrag import DEFAULT_EPSILON as FILTERRAG_DEFAULT_EPSILON
+from defense.filterrag import DEFAULT_SEMANTIC_THRESHOLD as FILTERRAG_DEFAULT_SEMANTIC_THRESHOLD
+from defense.filterrag import VALID_MATCHING_MODES as FILTERRAG_VALID_MATCHING_MODES
 from defense.passages import label_passages
 from defense.passages import texts as passage_texts
 from defense.diagnostics import (
@@ -130,6 +132,38 @@ def parse_args():
             "Device for FilterRAG's SLM ('auto': Apple Silicon Metal/MPS if "
             "available, else CUDA, else CPU). Only used by --defense filterrag. "
             "See defense/filterrag.py:resolve_slm_device()."
+        ),
+    )
+    parser.add_argument(
+        "--filterrag_matching_mode",
+        type=str,
+        default="exact",
+        choices=list(FILTERRAG_VALID_MATCHING_MODES),
+        help=(
+            "Keyword-to-passage-word matching mode for FilterRAG's Freq-Density "
+            "computation (used by --defense filterrag/filterrag_query_only). "
+            "'exact' (default, legacy/backward-compatible): a keyword must "
+            "appear verbatim (case-folded) in the passage -- equivalent to the "
+            "paper's own similarity-threshold ablation at threshold=1.0, which "
+            "the paper reports as its worst-performing setting. 'semantic' "
+            "(paper-faithful, Edemacu et al. 2025 Section IV-B2): keyword and "
+            "passage words are matched by cosine similarity of "
+            "sentence-transformers/all-MiniLM-L6-v2 embeddings, thresholded by "
+            "--filterrag_semantic_threshold. See "
+            "docs/FILTERRAG_FIDELITY_AUDIT.md for the full writeup of this "
+            "deviation and why the default here stays 'exact' (existing "
+            "diagnostics/scripts assume it) rather than switching to the "
+            "paper-faithful default."
+        ),
+    )
+    parser.add_argument(
+        "--filterrag_semantic_threshold",
+        type=float,
+        default=FILTERRAG_DEFAULT_SEMANTIC_THRESHOLD,
+        help=(
+            "Cosine-similarity threshold for --filterrag_matching_mode semantic "
+            "(paper default 0.6, sentence-transformers/all-MiniLM-L6-v2). "
+            "Unused when --filterrag_matching_mode exact."
         ),
     )
 
@@ -351,6 +385,8 @@ def main():
                         filterrag_epsilon=args.filterrag_epsilon,
                         filterrag_slm_model=args.filterrag_slm_model,
                         filterrag_slm_device=args.filterrag_slm_device,
+                        filterrag_matching_mode=args.filterrag_matching_mode,
+                        filterrag_semantic_threshold=args.filterrag_semantic_threshold,
                     )
                 latency_defense_sec = _dt["elapsed_sec"]
                 topk_contents = passage_texts(kept_passages)

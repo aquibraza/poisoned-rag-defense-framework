@@ -1,12 +1,17 @@
 """Tests for defense/filterrag.py -- Freq-Density scoring and threshold
 filtering (FilterRAG baseline, Edemacu et al. 2025).
 
-Fully offline: no HF model is downloaded or loaded. `slm_answer_fn` is
-mocked with a plain Python function everywhere, exactly like
-test_dispatch_smoke.py mocks RAGDefender's sentence-transformers encoder.
-TestResolveSlmDevice mocks `torch` itself (via sys.modules) so this file has
-no hard dependency on torch being installed, matching every other test file
-here except test_dispatch_smoke.py.
+Fully offline: no HF model is downloaded or loaded, and no LLM/GPT/API call
+is ever made anywhere in this file. `slm_answer_fn` is mocked with a plain
+Python function everywhere, exactly like test_dispatch_smoke.py mocks
+RAGDefender's sentence-transformers encoder. Semantic matching
+(`matching_mode="semantic"`) is exercised via `FakeSemanticMatcher` (a
+dependency-free test double for `SemanticWordMatcher`) for matching-logic
+tests, and via a fake `sentence_transformers` module injected through
+`sys.modules` (mirroring the existing fake-`transformers` pattern below) for
+the lazy-loading tests specifically. TestResolveSlmDevice mocks `torch`
+itself (via sys.modules) so this file has no hard dependency on torch being
+installed, matching every other test file here except test_dispatch_smoke.py.
 
 Run with: python -m unittest tests.test_filterrag -v
 """
@@ -18,7 +23,17 @@ from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from defense.filterrag import DEFAULT_EPSILON, filterrag_defense, freq_density, score_passages
+from defense.filterrag import (
+    DEFAULT_EPSILON,
+    DEFAULT_SEMANTIC_MODEL,
+    DEFAULT_SEMANTIC_THRESHOLD,
+    SemanticWordMatcher,
+    filterrag_defense,
+    freq_density,
+    freq_density_detailed,
+    get_semantic_word_matcher,
+    score_passages,
+)
 from defense.passages import label_passages
 
 
@@ -41,6 +56,27 @@ def make_passages():
         {"doc_id": "clean2", "context": "Paris has a population of over two million people.", "score": 0.8, "source": "corpus", "is_poison": False},
     ]
     return label_passages(raw)
+
+
+class FakeSemanticMatcher:
+    """Deterministic, dependency-free test double for `SemanticWordMatcher`.
+
+    Returns a fixed cosine similarity for each `(doc_word, keyword)` pair
+    from a supplied dict (unlisted pairs default to 0.0 -- "unrelated").
+    Never touches `sentence_transformers`/`torch`, so matching-logic tests
+    can exercise `matching_mode="semantic"` without any real embedding
+    model. `call_count` lets tests assert the matcher (and therefore any
+    real model behind it) is only invoked when semantic mode is actually
+    used.
+    """
+
+    def __init__(self, similarities):
+        self.similarities = similarities
+        self.call_count = 0
+
+    def similarity_matrix(self, words_a, words_b):
+        self.call_count += 1
+        return [[self.similarities.get((wa, wb), 0.0) for wb in words_b] for wa in words_a]
 
 
 class TestFreqDensity(unittest.TestCase):
@@ -104,6 +140,328 @@ class TestScorePassagesWithMockedSlm(unittest.TestCase):
         # propagate so callers know their custom function is broken.
         with self.assertRaises(RuntimeError):
             score_passages("Where?", passages, slm_answer_fn=failing_slm)
+
+
+class TestExactMatchingModeIsDefaultAndBackwardCompatible(unittest.TestCase):
+    """matching_mode="exact" is the default and must reproduce the original
+    (pre-semantic-matching) freq_density()/score_passages()/
+    filterrag_defense() behavior byte-for-byte -- see TestFreqDensity,
+    TestScorePassagesQueryOnly, TestScorePassagesWithMockedSlm, and
+    TestFilterragDefense above, none of which pass matching_mode explicitly.
+    This class adds a few more explicit-default-vs-explicit-"exact" checks."""
+
+    def test_default_matching_mode_equals_explicit_exact(self):
+        text = "texas texas texas is the texas state texas texas"
+        self.assertEqual(freq_density(text, ["texas"]), freq_density(text, ["texas"], matching_mode="exact"))
+
+    def test_exact_mode_detail_reports_matched_keywords_and_unique_word_count(self):
+        detail = freq_density_detailed("texas is a state with texas cities", ["texas", "unrelated"], matching_mode="exact")
+        self.assertEqual(detail["matching_mode"], "exact")
+        self.assertIsNone(detail["semantic_threshold"])
+        self.assertEqual(detail["matched_keywords"], ["texas"])
+        self.assertEqual(detail["matched_keyword_count"], 1)
+        # unique words: {texas, is, a, state, with, cities} = 6
+        self.assertEqual(detail["unique_word_count"], 6)
+
+    def test_exact_mode_cannot_match_synonyms(self):
+        # "vehicle" never appears verbatim in the passage -- exact mode must
+        # score this exactly like "no keyword overlap at all".
+        score = freq_density("The car is red.", ["vehicle"], matching_mode="exact")
+        self.assertEqual(score, 0.0)
+
+    def test_invalid_matching_mode_raises_in_freq_density(self):
+        with self.assertRaises(ValueError):
+            freq_density("some text", ["kw"], matching_mode="fuzzy")
+
+    def test_invalid_matching_mode_raises_in_score_passages(self):
+        with self.assertRaises(ValueError):
+            score_passages("q?", make_passages(), matching_mode="fuzzy")
+
+    def test_invalid_matching_mode_raises_in_filterrag_defense(self):
+        with self.assertRaises(ValueError):
+            filterrag_defense("q?", make_passages(), matching_mode="fuzzy")
+
+
+class TestSemanticMatchingMode(unittest.TestCase):
+    """matching_mode="semantic" via an injected FakeSemanticMatcher -- no
+    real sentence_transformers/torch model is ever loaded here (see
+    TestSemanticMatcherLazyLoading below for that)."""
+
+    def test_semantic_matching_matches_synonym_exact_mode_misses(self):
+        passage = "The car is red."  # tokens: the, car, is, red
+        keywords = ["vehicle"]
+        self.assertEqual(freq_density(passage, keywords, matching_mode="exact"), 0.0)
+
+        matcher = FakeSemanticMatcher({("car", "vehicle"): 0.8})
+        semantic_score = freq_density(
+            passage, keywords, matching_mode="semantic", semantic_threshold=0.6, semantic_matcher=matcher
+        )
+        self.assertGreater(semantic_score, 0.0)
+        self.assertEqual(matcher.call_count, 1)
+
+    def test_semantic_threshold_gates_which_matches_count(self):
+        passage = "car car bus"  # unique words: car, bus
+        keywords = ["vehicle"]
+        matcher = FakeSemanticMatcher({("car", "vehicle"): 0.65, ("bus", "vehicle"): 0.55})
+
+        low_threshold_score = freq_density(
+            passage, keywords, matching_mode="semantic", semantic_threshold=0.5, semantic_matcher=matcher
+        )
+        mid_threshold_score = freq_density(
+            passage, keywords, matching_mode="semantic", semantic_threshold=0.6, semantic_matcher=matcher
+        )
+        high_threshold_score = freq_density(
+            passage, keywords, matching_mode="semantic", semantic_threshold=0.7, semantic_matcher=matcher
+        )
+        # threshold 0.5: both car (freq 2) and bus (freq 1) match -> 3/2
+        self.assertAlmostEqual(low_threshold_score, 1.5)
+        # threshold 0.6: only car (freq 2) matches (0.65 >= 0.6, 0.55 < 0.6) -> 2/2
+        self.assertAlmostEqual(mid_threshold_score, 1.0)
+        # threshold 0.7: neither 0.65 nor 0.55 clears it -> nothing matches
+        self.assertEqual(high_threshold_score, 0.0)
+        self.assertGreater(low_threshold_score, mid_threshold_score)
+        self.assertGreater(mid_threshold_score, high_threshold_score)
+
+    def test_matched_keyword_count_and_list_are_reported(self):
+        passage = "car car bus taxi"  # unique words: car, bus, taxi
+        keywords = ["vehicle", "transport"]
+        matcher = FakeSemanticMatcher({
+            ("car", "vehicle"): 0.9,
+            ("bus", "transport"): 0.7,
+            ("taxi", "vehicle"): 0.65,
+        })
+        detail = freq_density_detailed(
+            passage, keywords, matching_mode="semantic", semantic_threshold=0.6, semantic_matcher=matcher
+        )
+        self.assertEqual(detail["matching_mode"], "semantic")
+        self.assertEqual(detail["semantic_threshold"], 0.6)
+        self.assertEqual(detail["unique_word_count"], 3)
+        self.assertEqual(detail["matched_keyword_count"], 2)
+        self.assertEqual(set(detail["matched_keywords"]), {"vehicle", "transport"})
+        # car (freq 2) + bus (freq 1) + taxi (freq 1) all matched -> 4/3
+        self.assertAlmostEqual(detail["freq_density_score"], 4 / 3)
+
+    def test_semantic_mode_defaults_to_zero_threshold_semantic_threshold_field_only_set_for_semantic(self):
+        exact_detail = freq_density_detailed("some passage text", ["kw"], matching_mode="exact")
+        self.assertIsNone(exact_detail["semantic_threshold"])
+
+        matcher = FakeSemanticMatcher({})
+        semantic_detail = freq_density_detailed(
+            "some passage text", ["kw"], matching_mode="semantic", semantic_threshold=0.42, semantic_matcher=matcher
+        )
+        self.assertEqual(semantic_detail["semantic_threshold"], 0.42)
+
+    def test_empty_passage_returns_zero_in_semantic_mode_too(self):
+        matcher = FakeSemanticMatcher({})
+        self.assertEqual(
+            freq_density("", ["vehicle"], matching_mode="semantic", semantic_matcher=matcher), 0.0
+        )
+        self.assertEqual(matcher.call_count, 0)  # nothing to embed for an empty passage
+
+    def test_invalid_matching_mode_raises(self):
+        with self.assertRaises(ValueError):
+            freq_density_detailed("text", ["kw"], matching_mode="not_a_mode")
+
+
+class TestScorePassagesSemanticMode(unittest.TestCase):
+    def test_semantic_diagnostics_fields_present(self):
+        passages = make_passages()
+        matcher = FakeSemanticMatcher({})
+        scores = score_passages(
+            "Where is texas?", passages, slm_answer_fn=None,
+            matching_mode="semantic", semantic_threshold=0.6, semantic_matcher=matcher,
+        )
+        for s in scores:
+            self.assertEqual(s["matching_mode"], "semantic")
+            self.assertEqual(s["semantic_threshold"], 0.6)
+            self.assertIn("unique_word_count", s)
+            self.assertIn("matched_keyword_count", s)
+            self.assertIn("matched_keywords_sample", s)
+            # Pre-existing keys must still be present (backward compatibility).
+            self.assertIn("doc_id", s)
+            self.assertIn("freq_density_score", s)
+            self.assertIn("slm_answer", s)
+
+    def test_matched_keywords_sample_is_capped(self):
+        passages = make_passages()
+        # Every unique word in "adv1" matches every keyword (similarity 1.0),
+        # so the *uncapped* matched_keywords list would be large; the sample
+        # in score_passages() must still be capped.
+        query = "the state texas is the state texas the state texas the state"
+        matcher = FakeSemanticMatcher({
+            (doc_word, kw): 1.0
+            for doc_word in "texas texas texas texas is the state texas texas texas".split()
+            for kw in query.split()
+        })
+        scores = score_passages(
+            query, passages, slm_answer_fn=None,
+            matching_mode="semantic", semantic_threshold=0.6, semantic_matcher=matcher,
+            matched_keywords_sample_limit=2,
+        )
+        by_id = {s["doc_id"]: s for s in scores}
+        self.assertLessEqual(len(by_id["adv1"]["matched_keywords_sample"]), 2)
+        # The full count is not capped, even though the sample is.
+        self.assertGreaterEqual(by_id["adv1"]["matched_keyword_count"], len(by_id["adv1"]["matched_keywords_sample"]))
+
+    def test_query_only_ablation_still_skips_slm_in_semantic_mode(self):
+        """matching_mode is orthogonal to the SLM-vs-query-only axis: the
+        query_only ablation (slm_answer_fn=None) must still skip the SLM
+        step even when matching_mode="semantic"."""
+        passages = make_passages()
+        matcher = FakeSemanticMatcher({})
+        scores = score_passages(
+            "Where is texas?", passages, slm_answer_fn=None,
+            matching_mode="semantic", semantic_matcher=matcher,
+        )
+        for s in scores:
+            self.assertIsNone(s["slm_answer"])
+
+    def test_full_mode_still_uses_slm_answer_in_semantic_mode(self):
+        passages = make_passages()
+        matcher = FakeSemanticMatcher({})
+
+        def fake_slm(question, passage_text):
+            return "texas"
+
+        scores = score_passages(
+            "Where?", passages, slm_answer_fn=fake_slm,
+            matching_mode="semantic", semantic_matcher=matcher,
+        )
+        by_id = {s["doc_id"]: s for s in scores}
+        self.assertEqual(by_id["clean1"]["slm_answer"], "texas")
+        self.assertEqual(by_id["clean1"]["matching_mode"], "semantic")
+
+
+class TestFilterragDefenseSemanticMode(unittest.TestCase):
+    def test_semantic_matching_removes_synonym_stuffed_passage_exact_mode_keeps(self):
+        raw = [
+            {"doc_id": "clean1", "context": "Some unrelated clean fact about the world.", "score": 0.9, "source": "corpus", "is_poison": False},
+            {"doc_id": "adv1", "context": "automobile automobile automobile automobile is the thing automobile automobile.", "score": 0.85, "source": "adversarial", "is_poison": True},
+        ]
+        passages = label_passages(raw)
+        query = "What powers my sedan?"  # no token here is verbatim in adv1's text
+
+        # Exact mode: no query keyword appears verbatim in adv1 -> score 0,
+        # nothing trips the epsilon threshold -- adv1 survives.
+        kept_exact, _ = filterrag_defense(query, passages, epsilon=DEFAULT_EPSILON, matching_mode="exact")
+        self.assertIn("adv1", {p.doc_id for p in kept_exact})
+
+        # Semantic mode: "automobile" ~ "sedan" is a synonym match the exact
+        # mode above structurally cannot catch.
+        matcher = FakeSemanticMatcher({("automobile", "sedan"): 0.85})
+        kept_semantic, diag = filterrag_defense(
+            query, passages, epsilon=DEFAULT_EPSILON,
+            matching_mode="semantic", semantic_threshold=0.6, semantic_matcher=matcher,
+        )
+        self.assertNotIn("adv1", {p.doc_id for p in kept_semantic})
+        self.assertIn("clean1", {p.doc_id for p in kept_semantic})
+        self.assertIn("matching_mode=semantic", diag["notes"])
+        self.assertIn("semantic_threshold=0.6", diag["notes"])
+
+    def test_notes_field_still_reports_slm_vs_query_only_mode(self):
+        passages = make_passages()
+        matcher = FakeSemanticMatcher({})
+        _, diag_query_only = filterrag_defense(
+            "Where is texas?", passages, matching_mode="semantic", semantic_matcher=matcher
+        )
+        self.assertIn("mode=query_only_ablation", diag_query_only["notes"])
+
+        _, diag_slm = filterrag_defense(
+            "Where is texas?", passages, slm_answer_fn=lambda q, p: "texas",
+            matching_mode="semantic", semantic_matcher=matcher,
+        )
+        self.assertIn("mode=slm", diag_slm["notes"])
+
+
+class TestSemanticMatcherLazyLoading(unittest.TestCase):
+    """`sentence_transformers` must only ever be imported when
+    matching_mode="semantic" is actually used -- never for the default
+    "exact" mode. Exercised two ways: (1) proving exact-mode calls never
+    even reach `get_semantic_word_matcher()`, and (2) reproducing the real
+    lazy-import path with a fake `sentence_transformers` module injected via
+    `sys.modules` (mirroring the existing fake-`transformers`/fake-`torch`
+    pattern used for the SLM backend tests below), so semantic mode is
+    proven to only import it on first actual use, and to cache both the
+    loaded model and per-word embeddings thereafter."""
+
+    @staticmethod
+    def _fake_sentence_transformers_module(word_vectors, load_calls):
+        fake_st = types.ModuleType("sentence_transformers")
+
+        class _FakeSentenceTransformer:
+            def __init__(self, model_name):
+                load_calls.append(model_name)
+                self.model_name = model_name
+
+            def encode(self, words, convert_to_numpy=True):
+                return [word_vectors[w] for w in words]
+
+        fake_st.SentenceTransformer = _FakeSentenceTransformer
+        return fake_st
+
+    def test_exact_mode_never_touches_get_semantic_word_matcher(self):
+        with mock.patch("defense.filterrag.get_semantic_word_matcher") as mock_get_matcher:
+            freq_density("texas is a state", ["texas"], matching_mode="exact")
+            score_passages("q?", make_passages(), matching_mode="exact")
+            filterrag_defense("q?", make_passages(), matching_mode="exact")
+        mock_get_matcher.assert_not_called()
+
+    def test_exact_mode_raises_importerror_if_sentence_transformers_forced_unavailable(self):
+        # Force `import sentence_transformers` to fail with ImportError if
+        # anything on the exact-mode path ever attempted it (it shouldn't).
+        with mock.patch.dict(sys.modules, {"sentence_transformers": None}):
+            score = freq_density("The car is red.", ["car"], matching_mode="exact")
+        self.assertGreater(score, 0.0)
+
+    def test_semantic_mode_lazily_imports_and_loads_model_only_on_first_use(self):
+        load_calls = []
+        word_vectors = {"vehicle": [1.0, 0.0], "car": [0.8, 0.6]}  # cos_sim(car, vehicle) = 0.8
+        fake_st = self._fake_sentence_transformers_module(word_vectors, load_calls)
+
+        matcher = SemanticWordMatcher("fake-model")
+        self.assertIsNone(matcher._model)  # not loaded yet -- construction is free
+
+        with mock.patch.dict(sys.modules, {"sentence_transformers": fake_st}):
+            sims = matcher.similarity_matrix(["car"], ["vehicle"])
+
+        self.assertEqual(load_calls, ["fake-model"])  # loaded exactly once
+        self.assertIsNotNone(matcher._model)
+        self.assertAlmostEqual(float(sims[0][0]), 0.8, places=4)
+
+    def test_semantic_mode_caches_word_embeddings_across_calls(self):
+        load_calls = []
+        embed_calls = []
+        word_vectors = {"vehicle": [1.0, 0.0], "car": [0.8, 0.6], "bus": [0.6, 0.8]}
+        fake_st = self._fake_sentence_transformers_module(word_vectors, load_calls)
+
+        matcher = SemanticWordMatcher("fake-model")
+        real_encode = fake_st.SentenceTransformer.encode
+
+        def _tracking_encode(self, words, convert_to_numpy=True):
+            embed_calls.append(list(words))
+            return real_encode(self, words, convert_to_numpy=convert_to_numpy)
+
+        fake_st.SentenceTransformer.encode = _tracking_encode
+
+        with mock.patch.dict(sys.modules, {"sentence_transformers": fake_st}):
+            matcher.similarity_matrix(["car"], ["vehicle"])
+            matcher.similarity_matrix(["car", "bus"], ["vehicle"])  # "car"/"vehicle" already cached
+
+        all_embedded = [w for call in embed_calls for w in call]
+        self.assertEqual(all_embedded.count("car"), 1)
+        self.assertEqual(all_embedded.count("vehicle"), 1)
+        self.assertEqual(all_embedded.count("bus"), 1)
+
+    def test_get_semantic_word_matcher_returns_process_wide_cached_instance(self):
+        model_name = "cache-test-model-xyz"
+        first = get_semantic_word_matcher(model_name)
+        second = get_semantic_word_matcher(model_name)
+        self.assertIs(first, second)
+        self.assertIsInstance(first, SemanticWordMatcher)
+
+    def test_get_semantic_word_matcher_default_model_matches_paper(self):
+        self.assertEqual(DEFAULT_SEMANTIC_MODEL, "sentence-transformers/all-MiniLM-L6-v2")
+        self.assertEqual(DEFAULT_SEMANTIC_THRESHOLD, 0.6)
 
 
 class TestResolveSlmDevice(unittest.TestCase):

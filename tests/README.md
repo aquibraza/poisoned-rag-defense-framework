@@ -3,7 +3,8 @@
 Lightweight `unittest`-based tests for the RAGDefender diagnostics work
 (`defense/passages.py`, `defense/diagnostics.py`, `defense/controls.py`,
 `defense/dispatch.py`, `defense/asr_match.py`, `defense/filterrag.py`,
-`scripts/summarize_ragdefender_diagnostics.py`).
+`scripts/summarize_ragdefender_diagnostics.py`, and `main.py`'s FilterRAG
+CLI flags).
 `pytest` is intentionally not used since it is not already a project
 dependency; everything here runs with the Python standard library.
 
@@ -28,8 +29,15 @@ Most test files (`test_passages.py`, `test_controls.py`,
 `test_summarizer.py`, `test_existing_results_compat.py`) have **no
 third-party dependencies** and run with any Python 3 interpreter, including
 the system `python3`. `test_filterrag.py` in particular never imports
-`transformers`/loads any HF model -- `slm_answer_fn` is always a plain mock
-function, exactly like `test_dispatch_smoke.py` mocks RAGDefender's encoder.
+`transformers`/`sentence_transformers`/loads any real HF model --
+`slm_answer_fn` is always a plain mock function (exactly like
+`test_dispatch_smoke.py` mocks RAGDefender's encoder), and
+`matching_mode="semantic"` is exercised via `FakeSemanticMatcher` (a
+dependency-free test double) for matching-logic tests, or a fake
+`sentence_transformers` module injected via `sys.modules` (mirroring the
+existing fake-`transformers`/fake-`torch` pattern) for the handful of tests
+that specifically verify the lazy-import/caching behavior of
+`SemanticWordMatcher`/`get_semantic_word_matcher()`.
 
 `test_dispatch_smoke.py` imports `defense.dispatch`, which imports
 `defense.defense_runner`, which imports `torch` and (lazily)
@@ -37,7 +45,9 @@ function, exactly like `test_dispatch_smoke.py` mocks RAGDefender's encoder.
 (e.g. a minimal system Python), that one file will fail to import. It does
 **not** require network access or a real embedding-model download -- it
 monkeypatches `defense_runner._get_s_model` with a deterministic fake
-encoder -- but it does need `torch` + `scikit-learn` + `sentence-transformers`
+encoder, and (for its FilterRAG semantic-matching-mode tests)
+`defense.filterrag.get_semantic_word_matcher` with a `FakeSemanticMatcher`
+-- but it does need `torch` + `scikit-learn` + `sentence-transformers`
 importable. If your project virtualenv (e.g. `PoisonedRAG_env`) can't load
 `torch` due to macOS Gatekeeper quarantine, see `fix_venv_gatekeeper.sh` at
 the repo root, or create a fresh venv and
@@ -45,6 +55,15 @@ the repo root, or create a fresh venv and
 `filterrag_query_only` cases need no such setup (no SLM, no
 sentence-transformers) and would pass even without `defense_runner`'s heavy
 deps, but the file as a whole still requires them to import at all.
+
+`test_main_cli_filterrag.py` imports `main.py` directly (to call
+`main.parse_args()`), which transitively imports `torch`, `transformers`,
+`sentence-transformers`, and `beir` (via `src.utils`/`src.models`) at module
+level -- same dependency footprint as `test_dispatch_smoke.py`. It does
+**not** run `main()`'s actual retrieval/generation pipeline (no BEIR
+dataset access, no dataset files on disk required) -- it only exercises
+`argparse` plus a source-level string check that `main.py`'s
+`run_defense(...)` call site forwards the new CLI args through.
 
 None of the tests here make any LLM/API call (no GPT-4, no PaLM, no
 Vicuna) or require GPU access.
@@ -72,7 +91,11 @@ Vicuna) or require GPU access.
 - `test_dispatch_smoke.py` -- `none`/`ragdefender_original`/
   `oracle_remove_all_poison`/`random_remove_same_count`/
   `filterrag_query_only` all run end-to-end through
-  `defense.dispatch.run_defense()` fully offline.
+  `defense.dispatch.run_defense()` fully offline; plus
+  `filterrag_matching_mode`/`filterrag_semantic_threshold` are correctly
+  forwarded through `run_defense()` for both `filterrag_query_only` and
+  (mocked-SLM) `filterrag`, `exact` remains the dispatch-level default, and
+  a synonym-stuffed passage is only caught in `semantic` mode (not `exact`).
 - `test_filterrag.py` -- `freq_density()` scores keyword-stuffed passages
   higher than unrelated ones (case-insensitive, no double-counting of
   duplicate keywords); `score_passages()`/`filterrag_defense()` behave
@@ -92,7 +115,27 @@ Vicuna) or require GPU access.
   every SLM call failed and was silently swallowed, making `filterrag` and
   `filterrag_query_only` produce identical scores); a per-passage SLM
   failure degrades to "no answer" for just that passage but logs a warning
-  at least once rather than failing completely silently.
+  at least once rather than failing completely silently. Also covers the
+  `matching_mode="semantic"` option added in
+  `docs/FILTERRAG_FIDELITY_AUDIT.md`: `exact` mode is unchanged/default and
+  structurally cannot match a synonym (`"vehicle"` never matches
+  `"car"`-only text); `semantic` mode (via `FakeSemanticMatcher`, no real
+  embedding model) *does* match such synonym pairs, and the similarity
+  threshold gates which pairs count; per-passage diagnostics report
+  `matching_mode`/`semantic_threshold`/`unique_word_count`/
+  `matched_keyword_count`/`matched_keywords_sample` (capped, so a
+  heavily-matched passage doesn't blow up output size, while
+  `matched_keyword_count` itself stays uncapped); `filterrag_query_only`
+  still skips the SLM step and `filterrag` still calls it regardless of
+  matching mode; invalid `matching_mode` values raise in
+  `freq_density`/`score_passages`/`filterrag_defense`; and
+  `sentence_transformers` is proven to be imported only when
+  `matching_mode="semantic"` is actually exercised (never for `exact`), with
+  both the loaded model and per-word embeddings cached across calls.
+- `test_main_cli_filterrag.py` -- `main.py`'s `--filterrag_matching_mode`
+  (default `exact`, choices `exact`/`semantic`, rejects invalid values) and
+  `--filterrag_semantic_threshold` (default 0.6, matching the paper) parse
+  correctly, and are forwarded into the `run_defense(...)` call site.
 - `test_summarizer.py` -- aggregation, CSV/Markdown report rendering
   (including the interpretation decision tree) against fake JSONL fixtures.
 - `test_existing_results_compat.py` -- pre-existing files under

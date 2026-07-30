@@ -25,7 +25,12 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 from defense import defense_runner
 from defense.controls import oracle_remove_all_poison, random_remove_same_count
-from defense.filterrag import DEFAULT_EPSILON, filterrag_defense, local_hf_slm_answer_fn
+from defense.filterrag import (
+    DEFAULT_EPSILON,
+    DEFAULT_SEMANTIC_THRESHOLD,
+    filterrag_defense,
+    local_hf_slm_answer_fn,
+)
 from defense.passages import RetrievedPassage
 
 # Canonical set of values accepted by --defense in main.py.
@@ -143,6 +148,8 @@ def run_defense(
     filterrag_epsilon: float = DEFAULT_EPSILON,
     filterrag_slm_model: str = "google/flan-t5-small",
     filterrag_slm_device: str = "auto",
+    filterrag_matching_mode: str = "exact",
+    filterrag_semantic_threshold: float = DEFAULT_SEMANTIC_THRESHOLD,
 ) -> Tuple[List[RetrievedPassage], Dict]:
     """Apply `defense_name` to `passages` and return (kept_passages, diag_extra).
 
@@ -155,10 +162,17 @@ def run_defense(
     random-removal baseline draws an independent sample per query instead of
     repeating the same relative removal pattern across every query in a run.
 
-    `filterrag_epsilon`/`filterrag_slm_model`/`filterrag_slm_device` only
-    apply to `filterrag`/`filterrag_query_only` -- see defense/filterrag.py.
+    `filterrag_epsilon`/`filterrag_slm_model`/`filterrag_slm_device`/
+    `filterrag_matching_mode`/`filterrag_semantic_threshold` only apply to
+    `filterrag`/`filterrag_query_only` -- see defense/filterrag.py.
     `filterrag_slm_device` is unused by `filterrag_query_only` (no SLM is
-    ever loaded in that mode).
+    ever loaded in that mode). `filterrag_matching_mode="exact"` (default)
+    preserves legacy/backward-compatible behavior;
+    `filterrag_matching_mode="semantic"` is the paper-faithful mode (see
+    docs/FILTERRAG_FIDELITY_AUDIT.md) and applies to both `filterrag` and
+    `filterrag_query_only` (matching mode and SLM-vs-query-only are
+    orthogonal knobs -- `filterrag_query_only` is never paper-faithful
+    either way, since it always skips the SLM step).
     """
     name = (defense_name or "none").lower()
 
@@ -182,11 +196,25 @@ def run_defense(
         )
 
     if name == "filterrag_query_only":
-        return filterrag_defense(query, passages, epsilon=filterrag_epsilon, slm_answer_fn=None)
+        return filterrag_defense(
+            query,
+            passages,
+            epsilon=filterrag_epsilon,
+            slm_answer_fn=None,
+            matching_mode=filterrag_matching_mode,
+            semantic_threshold=filterrag_semantic_threshold,
+        )
 
     if name == "filterrag":
         slm_answer_fn = local_hf_slm_answer_fn(filterrag_slm_model, device=filterrag_slm_device)
-        return filterrag_defense(query, passages, epsilon=filterrag_epsilon, slm_answer_fn=slm_answer_fn)
+        return filterrag_defense(
+            query,
+            passages,
+            epsilon=filterrag_epsilon,
+            slm_answer_fn=slm_answer_fn,
+            matching_mode=filterrag_matching_mode,
+            semantic_threshold=filterrag_semantic_threshold,
+        )
 
     raise ValueError(
         f"Unknown defense {defense_name!r}; expected one of {DEFENSE_CHOICES}"
