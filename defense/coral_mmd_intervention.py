@@ -1,6 +1,7 @@
-"""CORAL-style formal oracle interventions for Cluster-Normalized Poisoning.
+"""CORAL-style and MMD-minimizing formal oracle interventions for
+Cluster-Normalized Poisoning.
 
-**Steps 1 and 2** of the CORAL/MMD oracle intervention plan (see
+**Steps 1, 2, and 3** of the CORAL/MMD oracle intervention plan (see
 `docs/CORAL_MMD_ORACLE_INTERVENTION_PLAN.md` and the plan file
 `coral_mmd_oracle_intervention_plan_31a5d179.plan.md`):
 
@@ -16,10 +17,17 @@
   a materially different, and deliberately harsher/less-conservative,
   oracle transform than Step 1: see `coral_ridge_transform`'s docstring for
   why its null-space behavior is fundamentally different from Step 1's.
-
-Explicitly **out of scope for this module** (deferred to a later step of
-that plan, not implemented here): the MMD-minimizing gradient-based oracle
-optimizer.
+- **Step 3**: `mmd_minimize_transform` -- a **direct gradient-based oracle
+  optimizer** that moves the poison embeddings to directly minimize
+  biased-squared-RBF MMD against the clean embeddings (via PyTorch
+  autograd), rather than aligning second-order covariance statistics like
+  Steps 1/2. This tests whether a *distribution-alignment objective
+  applied directly*, rather than through the CORAL covariance-matching
+  proxy, is a stronger oracle stress test for RAGDefender's Stage 2. This
+  is **not** DAN (no discriminator network is trained; MMD here is used
+  exactly as in the original CORAL/MMD literature background, as a direct,
+  closed-form two-sample statistic optimized over frozen embeddings, never
+  as a learned model).
 
 Like `defense/cluster_normalized_poisoning.py`, this module is purely
 additive: it is never imported by `defense/defense_runner.py`,
@@ -71,15 +79,36 @@ additional (regularizer-dominated, not data-dominated) perturbation changes
 the Stage-2 outcome. See `CORAL_RIDGE_REPORT.md`'s Limitations section for
 why any resulting failure is not more "real" than Step 1's, even if it
 occurs.
+
+**Why Step 3 (direct MMD minimization) is a distinct oracle from Steps
+1/2:** CORAL (both variants) aligns the poison group's *second-order*
+statistics (covariance) to the clean group's; two distributions can have
+matched covariance while still being geometrically far apart or
+differently shaped in ways CORAL cannot see -- and, per Steps 1/2's own
+0/6 and 0/18 residual-poison-failure results, evidently did not disrupt
+RAGDefender's Stage-2 poison-pair structure. MMD is a full two-sample
+kernel statistic sensitive to more than just the covariance -- directly
+minimizing it is a strictly more direct (if less structured) oracle
+objective. It is implemented as a **direct gradient-based optimizer over
+the frozen poison embeddings** (`mmd_minimize_transform`, this module),
+never as a trained auxiliary model (e.g. a domain-adversarial network /
+DAN -- DAN is literature background motivating why MMD is a meaningful
+alignment objective, not something implemented or trained here), keeping
+it in the same "oracle embedding-space intervention" family as Steps 1/2
+and E0/E1: it still only ever produces a transformed `Zp_prime` for a
+fixed, already-retrieved set of passages, never a learned, reusable
+attack model or a natural-language rewrite.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Callable, List, Optional
 
 import numpy as np
+import torch
 
 from defense.cluster_normalized_poisoning import l2_normalize_rows
+from defense.distribution_metrics import DEFAULT_MMD_GAMMA
 
 __all__ = [
     "CoralPcaTransformResult",
@@ -89,6 +118,9 @@ __all__ = [
     "coral_ridge_transform",
     "PreservationMetrics",
     "compute_preservation_metrics",
+    "MmdTransformResult",
+    "mmd_minimize_transform",
+    "mmd_rbf_squared_raw",
 ]
 
 DEFAULT_EIGENVALUE_FLOOR = 1e-8
@@ -501,3 +533,217 @@ def compute_preservation_metrics(z_poison_original: np.ndarray, z_poison_transfo
         raise FloatingPointError("compute_preservation_metrics: non-finite values in displacement/cosine arrays")
 
     return metrics
+
+
+# --------------------------------------------------------------------------
+# Step 3: direct MMD-minimizing oracle optimizer
+# --------------------------------------------------------------------------
+
+DEFAULT_MMD_LR = 0.05
+
+
+def _pairwise_sq_euclidean_torch(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+    """`(n_x, n_y)` squared Euclidean distances between rows of `x`/`y`,
+    computed **without** an intermediate `sqrt` (unlike `torch.cdist`).
+    This matters for autograd correctness here: `torch.cdist(a, a)`'s
+    diagonal (`i == j`, distance exactly `0`) has a `sqrt` singularity in
+    its backward pass (`d/dx sqrt(x) = 1/(2*sqrt(x))`, undefined at
+    `x=0`), which would poison the gradient with `NaN`/`Inf` even though
+    the *forward* squared-distance value is a perfectly well-behaved `0`
+    -- the biased MMD estimator's `k_pp`/`k_cc` terms always include this
+    diagonal (self-distance) by construction. Computing the squared
+    distance directly via `((x_i - y_j)**2).sum()` has a well-defined
+    (zero) gradient at `x_i == y_j`, avoiding this pitfall entirely."""
+    diff = x.unsqueeze(1) - y.unsqueeze(0)  # (n_x, n_y, d)
+    return (diff ** 2).sum(dim=-1)
+
+
+def _mmd_rbf_squared_torch(x: torch.Tensor, y: torch.Tensor, gamma: float) -> torch.Tensor:
+    """Differentiable **biased** squared RBF-MMD between rows of `x`
+    (`n_x, d`) and `y` (`n_y, d`):
+
+        MMD^2(x, y) = mean(k_xx) + mean(k_yy) - 2 * mean(k_xy)
+        k(a, b) = exp(-gamma * ||a - b||^2)
+
+    Mathematically the same estimator as
+    `defense.distribution_metrics.mmd_rbf_distance_from_gram` (verified
+    numerically equal in `tests/test_mmd_intervention.py` when `x`/`y` are
+    both unit-norm, since `mmd_rbf_distance_from_gram` also uses
+    `||a-b||^2 = 2 - 2*cos(a,b)` for unit vectors, the same identity this
+    function implements directly on raw row vectors) -- kept as a
+    separate, PyTorch-native, differentiable implementation here purely
+    because `mmd_rbf_distance_from_gram` operates on precomputed
+    numpy Gram-matrix blocks, not on autograd-tracked tensors."""
+    def kernel_mean(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+        d2 = _pairwise_sq_euclidean_torch(a, b)
+        return torch.exp(-gamma * d2).mean()
+
+    return kernel_mean(x, x) + kernel_mean(y, y) - 2.0 * kernel_mean(x, y)
+
+
+def mmd_rbf_squared_raw(z_x: np.ndarray, z_y: np.ndarray, gamma: float = DEFAULT_MMD_GAMMA) -> float:
+    """Non-differentiable convenience wrapper around
+    `_mmd_rbf_squared_torch` for plain numpy arrays (no gradient tracking)
+    -- used by tests and by callers that want the biased RBF-MMD directly
+    from raw (not necessarily unit-norm) embedding rows, without going
+    through a cosine/Gram matrix first."""
+    x_t = torch.tensor(np.asarray(z_x, dtype=np.float64))
+    y_t = torch.tensor(np.asarray(z_y, dtype=np.float64))
+    with torch.no_grad():
+        return float(_mmd_rbf_squared_torch(x_t, y_t, gamma).item())
+
+
+@dataclass(frozen=True)
+class MmdTraceStep:
+    """One row of an MMD optimization trace (the numerical-only fields
+    `mmd_minimize_transform` itself can compute; RAGDefender-specific
+    fields like `top_pair_pp`/`decision_label` are added by the caller
+    via the `on_step` callback -- see `mmd_minimize_transform`)."""
+
+    step: int
+    z_poison_step: np.ndarray  # (n_poison, d), unit-norm, the optimizer's state at this step
+    mmd_loss: float
+    preservation_loss: float
+    total_loss: float
+
+
+@dataclass(frozen=True)
+class MmdTransformResult:
+    """Every intermediate of one `mmd_minimize_transform` call, for
+    logging and for the `steps=0` identity check (§ tests)."""
+
+    z_poison_final: np.ndarray  # final (unit-norm) transformed poison embeddings
+    trace: List[MmdTraceStep]   # one entry per step, 0..steps inclusive (steps+1 entries)
+    lambda_preserve: float
+    gamma: float
+    steps: int
+    lr: float
+
+
+def mmd_minimize_transform(z_poison: np.ndarray, z_clean: np.ndarray, lambda_preserve: float,
+                            gamma: float = DEFAULT_MMD_GAMMA, steps: int = 0, lr: float = DEFAULT_MMD_LR,
+                            seed: Optional[int] = None,
+                            on_step: Optional[Callable[[int, np.ndarray, float, float, float], None]] = None
+                            ) -> MmdTransformResult:
+    """Direct gradient-based MMD-minimizing oracle transform (Step 3 of
+    the CORAL/MMD oracle intervention plan). `z_clean` is **read-only**,
+    same data-flow contract as `coral_pca_transform`/`coral_ridge_transform`.
+
+    Unlike Steps 1/2 (which align covariance statistics in closed form),
+    this directly optimizes the transformed poison embeddings `Zp_prime`
+    with PyTorch autograd to minimize
+
+        L = MMD_RBF(Zp_prime, Zc) + lambda_preserve * mean_i(||Zp_prime_i - Zp_original_i||^2)
+
+    where `MMD_RBF` is the biased squared RBF-MMD (`_mmd_rbf_squared_torch`)
+    and the second (preservation) term is the **mean over poison rows** of
+    each row's squared L2 displacement from its original position (an
+    average, not a raw Frobenius-norm sum, so `lambda_preserve` stays in a
+    comparable numeric range to the `[0, ~2]`-bounded MMD term regardless
+    of `n_poison`/`d`).
+
+    **Both `Zp_original` and `Zc` are L2-normalized once up front, and
+    `Zp_prime` is re-projected onto the unit sphere after every optimizer
+    step** (`Zp_prime /= ||Zp_prime||` per row) -- this is the "project
+    back to the unit sphere" option from the plan (simpler than an added
+    penalty term), and it keeps the entire optimization in the same
+    unit-sphere representation `compute_preservation_metrics` and
+    RAGDefender's own cosine-similarity Stage 1/2 logic already operate
+    on (rather than the arbitrary-norm raw embedding space CORAL's
+    covariance alignment uses) -- a deliberate, documented design choice,
+    not an oversight relative to Steps 1/2.
+
+    At `steps=0`, the optimization loop never runs and `z_poison_final ==
+    normalize(z_poison)` **exactly** -- the identity/sanity control (same
+    role as `beta=0`/`alpha=1.0` for CORAL/E1). The returned `trace`
+    always has `steps + 1` entries (`step=0` through `step=steps`
+    inclusive): `step=0` is always the pre-optimization identity state
+    (`preservation_loss == 0.0` there, exactly, since `Zp_prime ==
+    Zp_original` at that point).
+
+    If `on_step` is given, it is called once per trace entry as
+    `on_step(step, z_poison_step, mmd_loss, preservation_loss,
+    total_loss)` with the optimizer's **current** (already unit-normalized)
+    poison embeddings at that step -- this lets a caller (e.g.
+    `scripts/run_mmd_oracle_intervention.py`) recombine `z_poison_step`
+    with the query's fixed clean embeddings and recompute
+    RAGDefender's Stage 1/2 decision at every step for a full per-step
+    trace CSV, without this module needing to know anything about
+    `k`/`doc_ids`/`is_poison`/Stage 1/2 itself (same separation-of-concerns
+    convention as the rest of this module).
+
+    Raises `ValueError` for `<1` row in either group, mismatched embedding
+    dims, `gamma <= 0`, `steps < 0`, or `lr <= 0`. Raises
+    `FloatingPointError` if the final transformed embeddings are
+    non-finite (should be unreachable for finite inputs and a
+    finite-magnitude `lr`, but asserted explicitly).
+    """
+    z_poison = np.asarray(z_poison, dtype=np.float64)
+    z_clean = np.asarray(z_clean, dtype=np.float64)
+    n_poison, n_clean = z_poison.shape[0], z_clean.shape[0]
+    if n_poison < 1 or n_clean < 1:
+        raise ValueError(
+            f"mmd_minimize_transform requires >= 1 row per group; got "
+            f"n_poison={n_poison}, n_clean={n_clean}."
+        )
+    if z_poison.shape[1] != z_clean.shape[1]:
+        raise ValueError(
+            f"z_poison and z_clean must share embedding dim; got {z_poison.shape[1]} vs {z_clean.shape[1]}"
+        )
+    if gamma <= 0:
+        raise ValueError(f"mmd_minimize_transform requires gamma > 0; got {gamma}")
+    if steps < 0:
+        raise ValueError(f"mmd_minimize_transform requires steps >= 0; got {steps}")
+    if lr <= 0:
+        raise ValueError(f"mmd_minimize_transform requires lr > 0; got {lr}")
+
+    zp_unit = l2_normalize_rows(z_poison)
+
+    if seed is not None:
+        torch.manual_seed(seed)
+
+    zp_t = torch.tensor(zp_unit, dtype=torch.float64, requires_grad=True)
+    zp_orig_t = torch.tensor(zp_unit, dtype=torch.float64)  # fixed reference for the preservation term
+    zc_t = torch.tensor(l2_normalize_rows(z_clean), dtype=torch.float64)  # fixed target
+
+    trace: List[MmdTraceStep] = []
+
+    def _record(step: int) -> None:
+        with torch.no_grad():
+            mmd_val = _mmd_rbf_squared_torch(zp_t, zc_t, gamma)
+            preserve_val = torch.mean(torch.sum((zp_t - zp_orig_t) ** 2, dim=1))
+            total_val = mmd_val + lambda_preserve * preserve_val
+        z_step = zp_t.detach().numpy().astype(np.float64).copy()
+        mmd_f, preserve_f, total_f = float(mmd_val.item()), float(preserve_val.item()), float(total_val.item())
+        trace.append(MmdTraceStep(step=step, z_poison_step=z_step, mmd_loss=mmd_f,
+                                   preservation_loss=preserve_f, total_loss=total_f))
+        if on_step is not None:
+            on_step(step, z_step, mmd_f, preserve_f, total_f)
+
+    _record(0)  # pre-optimization identity state; preservation_loss == 0.0 exactly here
+
+    if steps > 0:
+        optimizer = torch.optim.SGD([zp_t], lr=lr)
+        for step in range(1, steps + 1):
+            optimizer.zero_grad()
+            mmd_loss_t = _mmd_rbf_squared_torch(zp_t, zc_t, gamma)
+            preserve_loss_t = torch.mean(torch.sum((zp_t - zp_orig_t) ** 2, dim=1))
+            total_loss_t = mmd_loss_t + lambda_preserve * preserve_loss_t
+            total_loss_t.backward()
+            optimizer.step()
+            with torch.no_grad():
+                zp_t /= zp_t.norm(dim=1, keepdim=True).clamp_min(1e-12)
+            _record(step)
+
+    z_poison_final = zp_t.detach().numpy().astype(np.float64)
+    if not np.all(np.isfinite(z_poison_final)):
+        raise FloatingPointError("mmd_minimize_transform: z_poison_final contains non-finite values")
+
+    return MmdTransformResult(
+        z_poison_final=z_poison_final,
+        trace=trace,
+        lambda_preserve=float(lambda_preserve),
+        gamma=float(gamma),
+        steps=int(steps),
+        lr=float(lr),
+    )
