@@ -90,16 +90,27 @@ class _BatchEncodingLike(dict):
 
 
 class _FakeTokenCount:
-    def __init__(self, n):
+    """Fake tensor-like object: supports `.numel()` (token count) and
+    `.to(device)` (records the device it was moved to, defaulting to 'cpu'
+    -- mirrors a real `torch.Tensor`'s starting device before any `.to()`
+    call, so a test can assert `slm_answer_joint_logprob()` actually moves
+    it onto the model's device before calling `model(...)`)."""
+
+    def __init__(self, n, device="cpu"):
         self._n = n
+        self.device = device
 
     def numel(self):
         return self._n
 
+    def to(self, device):
+        self.device = device
+        return self
+
 
 class FakeSeq2SeqTokenizer:
     """Whitespace-tokenizes; every call returns a BatchEncoding-like object
-    with the right `.numel()`/`**`-unpacking shape for
+    with the right `.numel()`/`.to()`/`**`-unpacking shape for
     slm_answer_joint_logprob(), with no real tokenizer involved."""
 
     def __call__(self, text, return_tensors=None, truncation=None, max_length=None):
@@ -110,12 +121,22 @@ class FakeSeq2SeqTokenizer:
 class FakeSeq2SeqModel:
     """Always reports a fixed mean `loss`, regardless of input -- lets
     slm_answer_joint_logprob()'s `-loss * n` conversion be checked exactly
-    against a known value."""
+    against a known value. `device` (default 'cpu') is exposed via
+    `.parameters()`, exactly like a real `torch.nn.Module`, so
+    `next(model.parameters()).device` resolves the same way it would for a
+    real model; `call_kwargs` records the last forward-call's kwargs so a
+    test can inspect what device the passed-in tensors were on."""
 
-    def __init__(self, loss=0.5):
+    def __init__(self, loss=0.5, device="cpu"):
         self.loss = loss
+        self.device = device
+        self.call_kwargs = None
+
+    def parameters(self):
+        yield types.SimpleNamespace(device=self.device)
 
     def __call__(self, **kwargs):
+        self.call_kwargs = kwargs
         return types.SimpleNamespace(loss=types.SimpleNamespace(item=lambda: self.loss))
 
 
@@ -252,6 +273,35 @@ class TestSlmAnswerJointLogprobConversion(unittest.TestCase):
         tokenizer = FakeSeq2SeqTokenizer()
         logprob, n = m.slm_answer_joint_logprob(model, tokenizer, "prompt", "   ")
         self.assertEqual((logprob, n), (0.0, 0))
+
+    def test_encoder_inputs_and_label_ids_moved_to_model_device_before_forward(self):
+        """Regression test for the mps/cpu device-mismatch crash: a model
+        placed on a non-cpu device (real repro: --filterrag_slm_device mps)
+        must be called with tensors already moved onto that same device --
+        tokenizer output starts on 'cpu' (see _FakeTokenCount's default),
+        so this only passes if slm_answer_joint_logprob() actually calls
+        .to(device) before model(...), not after/never."""
+        model = FakeSeq2SeqModel(loss=0.5, device="mps")
+        tokenizer = FakeSeq2SeqTokenizer()
+
+        logprob, n = m.slm_answer_joint_logprob(model, tokenizer, "prompt text", "two words")
+
+        self.assertEqual(n, 2)
+        self.assertEqual(logprob, -0.5 * 2)
+        self.assertIsNotNone(model.call_kwargs)
+        self.assertEqual(model.call_kwargs["input_ids"].device, "mps")
+        self.assertEqual(model.call_kwargs["labels"].device, "mps")
+
+    def test_cpu_device_model_still_works_end_to_end(self):
+        """The device-move is unconditional (always .to(device)), but must
+        be a no-op in effect when the model is already on cpu (the common
+        case in this repo's test suite / CPU-only CI)."""
+        model = FakeSeq2SeqModel(loss=0.5, device="cpu")
+        tokenizer = FakeSeq2SeqTokenizer()
+        logprob, n = m.slm_answer_joint_logprob(model, tokenizer, "prompt", "two words")
+        self.assertEqual((logprob, n), (-1.0, 2))
+        self.assertEqual(model.call_kwargs["input_ids"].device, "cpu")
+        self.assertEqual(model.call_kwargs["labels"].device, "cpu")
 
 
 class TestExtractFeaturesFiniteness(unittest.TestCase):

@@ -15,6 +15,7 @@ installed, matching every other test file here except test_dispatch_smoke.py.
 
 Run with: python -m unittest tests.test_filterrag -v
 """
+import math
 import os
 import sys
 import types
@@ -28,6 +29,7 @@ from defense.filterrag import (
     DEFAULT_SEMANTIC_MODEL,
     DEFAULT_SEMANTIC_THRESHOLD,
     SemanticWordMatcher,
+    _cosine_similarity_matrix,
     filterrag_defense,
     freq_density,
     freq_density_detailed,
@@ -389,9 +391,10 @@ class TestSemanticMatcherLazyLoading(unittest.TestCase):
         fake_st = types.ModuleType("sentence_transformers")
 
         class _FakeSentenceTransformer:
-            def __init__(self, model_name):
+            def __init__(self, model_name, device=None):
                 load_calls.append(model_name)
                 self.model_name = model_name
+                self.device = device
 
             def encode(self, words, convert_to_numpy=True):
                 return [word_vectors[w] for w in words]
@@ -462,6 +465,87 @@ class TestSemanticMatcherLazyLoading(unittest.TestCase):
     def test_get_semantic_word_matcher_default_model_matches_paper(self):
         self.assertEqual(DEFAULT_SEMANTIC_MODEL, "sentence-transformers/all-MiniLM-L6-v2")
         self.assertEqual(DEFAULT_SEMANTIC_THRESHOLD, 0.6)
+
+    def test_semantic_word_matcher_defaults_to_cpu_device(self):
+        """SemanticWordMatcher()/get_semantic_word_matcher() must default to
+        device='cpu' -- word-level embedding is cheap, and CPU is stable
+        (unlike this repo's mps backend, which has previously misbehaved
+        elsewhere in this file)."""
+        matcher = SemanticWordMatcher("fake-model")
+        self.assertEqual(matcher.device, "cpu")
+
+        load_calls = []
+        fake_st = self._fake_sentence_transformers_module({"car": [1.0, 0.0]}, load_calls)
+        with mock.patch.dict(sys.modules, {"sentence_transformers": fake_st}):
+            matcher.similarity_matrix(["car"], ["car"])
+        self.assertEqual(matcher._model.device, "cpu")
+
+    def test_get_semantic_word_matcher_defaults_to_cpu_and_is_keyed_by_device(self):
+        cpu_matcher = get_semantic_word_matcher("device-cache-test-model")
+        self.assertEqual(cpu_matcher.device, "cpu")
+        explicit_cpu_matcher = get_semantic_word_matcher("device-cache-test-model", device="cpu")
+        self.assertIs(cpu_matcher, explicit_cpu_matcher)
+        other_device_matcher = get_semantic_word_matcher("device-cache-test-model", device="mps")
+        self.assertIsNot(cpu_matcher, other_device_matcher)
+        self.assertEqual(other_device_matcher.device, "mps")
+
+
+class TestCosineSimilarityMatrixHardening(unittest.TestCase):
+    """`_cosine_similarity_matrix()` must never emit nan/inf, even when fed
+    degenerate embeddings -- a real failure mode observed from
+    `sentence_transformers`/torch backends misbehaving (see module docstring
+    on `_cosine_similarity_matrix`)."""
+
+    def test_normal_vectors_still_compute_correct_cosine_similarity(self):
+        # (1,0) vs (0,1): orthogonal -> 0.0; (1,0) vs (1,0): identical -> 1.0.
+        sims = _cosine_similarity_matrix([[1.0, 0.0]], [[0.0, 1.0], [1.0, 0.0]])
+        self.assertAlmostEqual(float(sims[0][0]), 0.0, places=6)
+        self.assertAlmostEqual(float(sims[0][1]), 1.0, places=6)
+
+    def test_zero_vector_row_produces_finite_zero_similarity(self):
+        sims = _cosine_similarity_matrix([[0.0, 0.0]], [[1.0, 0.0]])
+        self.assertTrue(math.isfinite(sims[0][0]))
+        self.assertEqual(sims[0][0], 0.0)
+
+    def test_zero_vector_on_both_sides(self):
+        sims = _cosine_similarity_matrix([[0.0, 0.0]], [[0.0, 0.0]])
+        self.assertTrue(math.isfinite(sims[0][0]))
+        self.assertEqual(sims[0][0], 0.0)
+
+    def test_inf_vector_produces_finite_similarity(self):
+        sims = _cosine_similarity_matrix([[float("inf"), 0.0]], [[1.0, 0.0]])
+        self.assertTrue(math.isfinite(sims[0][0]))
+
+    def test_neg_inf_vector_produces_finite_similarity(self):
+        sims = _cosine_similarity_matrix([[float("-inf"), 1.0]], [[1.0, 0.0]])
+        self.assertTrue(math.isfinite(sims[0][0]))
+
+    def test_nan_vector_produces_finite_similarity(self):
+        sims = _cosine_similarity_matrix([[float("nan"), 0.0]], [[1.0, 0.0]])
+        self.assertTrue(math.isfinite(sims[0][0]))
+
+    def test_mixed_normal_and_degenerate_rows_in_same_call(self):
+        sims = _cosine_similarity_matrix(
+            [[1.0, 0.0], [0.0, 0.0], [float("nan"), float("inf")]],
+            [[1.0, 0.0], [0.0, 1.0]],
+        )
+        for row in sims:
+            for value in row:
+                self.assertTrue(math.isfinite(value))
+        # The well-formed row's similarities are unaffected by the other
+        # (degenerate) rows in the same batch call.
+        self.assertAlmostEqual(float(sims[0][0]), 1.0, places=6)
+        self.assertAlmostEqual(float(sims[0][1]), 0.0, places=6)
+
+    def test_no_runtime_warnings_emitted_for_degenerate_inputs(self):
+        import warnings
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", RuntimeWarning)
+            _cosine_similarity_matrix(
+                [[0.0, 0.0], [float("nan"), float("inf")], [float("-inf"), 5.0]],
+                [[0.0, 0.0], [1.0, 1.0]],
+            )  # must not raise/warn (divide-by-zero, overflow, invalid-value, etc.)
 
 
 class TestResolveSlmDevice(unittest.TestCase):

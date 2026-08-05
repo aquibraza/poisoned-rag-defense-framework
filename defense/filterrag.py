@@ -361,14 +361,46 @@ def _cosine_similarity_matrix(embeddings_a: Sequence[Sequence[float]], embedding
     This also makes `SemanticWordMatcher` trivially mockable in tests: a
     fake matcher just needs to return plain nested lists/arrays from
     `similarity_matrix()`, no `torch`/`sentence_transformers` involved.
+
+    Hardened against non-finite input: a `nan`/`inf` embedding value (seen
+    in practice from a misbehaving accelerator backend) or an all-zero
+    embedding row must never propagate into a `nan`/`inf` similarity value
+    -- `freq_density_detailed()`'s `sims[i][j] >= semantic_threshold`
+    comparison would otherwise silently evaluate to `False` for `nan`
+    (numpy's documented `nan` comparison behavior), which is at best a
+    misleading non-match and at worst raises `RuntimeWarning`s
+    (divide/overflow/invalid) that pollute unrelated diagnostic output.
+    Non-finite *inputs* are zeroed via `np.nan_to_num` before norming; a
+    resulting zero (or otherwise non-finite) row norm is treated as "no
+    direction" (similarity 0 against everything, rather than dividing by
+    ~0 and producing `inf`/`nan`); and the final matrix is `np.nan_to_num`'d
+    once more as a last-resort safety net.
     """
     import numpy as np  # noqa: PLC0415 -- keep numpy off this module's import path too
 
-    a = np.asarray(embeddings_a, dtype=float)
-    b = np.asarray(embeddings_b, dtype=float)
-    a_norm = a / (np.linalg.norm(a, axis=1, keepdims=True) + 1e-12)
-    b_norm = b / (np.linalg.norm(b, axis=1, keepdims=True) + 1e-12)
-    return a_norm @ b_norm.T
+    a = np.nan_to_num(np.asarray(embeddings_a, dtype=np.float64), nan=0.0, posinf=0.0, neginf=0.0)
+    b = np.nan_to_num(np.asarray(embeddings_b, dtype=np.float64), nan=0.0, posinf=0.0, neginf=0.0)
+
+    a_norms = np.linalg.norm(a, axis=1, keepdims=True)
+    b_norms = np.linalg.norm(b, axis=1, keepdims=True)
+    a_has_direction = np.isfinite(a_norms) & (a_norms > 0)
+    b_has_direction = np.isfinite(b_norms) & (b_norms > 0)
+
+    with np.errstate(divide="ignore", over="ignore", invalid="ignore"):
+        # `a`/`b` are already sanitized above (no nan/inf, and every row is
+        # either finite-normed or zeroed out), so `a_norm`/`b_norm` are
+        # always finite here -- but some BLAS backends (observed with
+        # Apple's Accelerate framework on Apple Silicon) still raise
+        # spurious divide/overflow/invalid-value FP warnings out of `@`
+        # even for perfectly well-formed, finite float64 inputs (this
+        # appears to be a hardware/SIMD-lane artifact internal to the BLAS
+        # kernel, not a real numerical problem -- `sims` itself comes back
+        # fully finite either way). `np.errstate` scopes the suppression to
+        # just this one matmul call, not the whole module/process.
+        a_norm = np.divide(a, a_norms, out=np.zeros_like(a), where=a_has_direction)
+        b_norm = np.divide(b, b_norms, out=np.zeros_like(b), where=b_has_direction)
+        sims = a_norm @ b_norm.T
+    return np.nan_to_num(sims, nan=0.0, posinf=1.0, neginf=-1.0)
 
 
 class SemanticWordMatcher:
@@ -383,17 +415,28 @@ class SemanticWordMatcher:
     re-embed the same word. Construct via `get_semantic_word_matcher()` for
     the module-level cached instance; construct directly only for tests
     (e.g. to swap in a fake `_ensure_model`) or to use a non-default model.
+
+    `device` defaults to `"cpu"` -- deliberately, *not* auto-detected the
+    way `resolve_slm_device()` is for the SLM backend below. Word-level
+    embedding of a couple dozen short tokens per passage is cheap enough
+    that CPU has no material cost here, and CPU is simply more stable: this
+    repo's non-CPU backend (`mps`) has previously caused hard-to-debug
+    numerical issues elsewhere in this file (see `_get_local_hf_slm_pipeline`'s
+    MPS smoke-test workaround), so semantic word matching is kept off it by
+    default rather than inheriting the same risk. Pass an explicit `device`
+    to override.
     """
 
-    def __init__(self, model_name: str = DEFAULT_SEMANTIC_MODEL):
+    def __init__(self, model_name: str = DEFAULT_SEMANTIC_MODEL, device: str = "cpu"):
         self.model_name = model_name
+        self.device = device
         self._model = None
         self._embedding_cache: Dict[str, object] = {}
 
     def _ensure_model(self):
         if self._model is None:
             from sentence_transformers import SentenceTransformer  # noqa: PLC0415 -- intentional lazy import
-            self._model = SentenceTransformer(self.model_name)
+            self._model = SentenceTransformer(self.model_name, device=self.device)
         return self._model
 
     def _embed(self, words: Sequence[str]):
@@ -419,16 +462,19 @@ class SemanticWordMatcher:
         return _cosine_similarity_matrix(emb_a, emb_b)
 
 
-_SEMANTIC_MATCHER_CACHE: Dict[str, SemanticWordMatcher] = {}
+_SEMANTIC_MATCHER_CACHE: Dict[Tuple[str, str], SemanticWordMatcher] = {}
 
 
-def get_semantic_word_matcher(model_name: str = DEFAULT_SEMANTIC_MODEL) -> SemanticWordMatcher:
-    """Return a process-wide cached `SemanticWordMatcher` for `model_name`,
-    creating it (but not yet loading the HF model -- that happens lazily on
-    first `similarity_matrix()` call) if it doesn't exist yet."""
-    if model_name not in _SEMANTIC_MATCHER_CACHE:
-        _SEMANTIC_MATCHER_CACHE[model_name] = SemanticWordMatcher(model_name)
-    return _SEMANTIC_MATCHER_CACHE[model_name]
+def get_semantic_word_matcher(model_name: str = DEFAULT_SEMANTIC_MODEL, device: str = "cpu") -> SemanticWordMatcher:
+    """Return a process-wide cached `SemanticWordMatcher` for
+    `(model_name, device)`, creating it (but not yet loading the HF model --
+    that happens lazily on first `similarity_matrix()` call) if it doesn't
+    exist yet. `device` defaults to `"cpu"` -- see `SemanticWordMatcher`'s
+    docstring for why this is a fixed default rather than auto-detected."""
+    key = (model_name, device)
+    if key not in _SEMANTIC_MATCHER_CACHE:
+        _SEMANTIC_MATCHER_CACHE[key] = SemanticWordMatcher(model_name, device=device)
+    return _SEMANTIC_MATCHER_CACHE[key]
 
 
 # ---------------------------------------------------------------------------

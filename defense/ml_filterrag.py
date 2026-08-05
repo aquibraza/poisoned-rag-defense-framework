@@ -237,6 +237,15 @@ def slm_answer_joint_logprob(
 
     Returns `(0.0, 0)` if `answer_text` is `None`/empty (the SLM produced no
     answer for this passage) -- a documented neutral fallback, not a crash.
+
+    `encoder_inputs`/`label_ids` are moved onto `model`'s own device (via
+    `next(model.parameters()).device`) *before* the forward pass. Without
+    this, a model placed on a non-CPU accelerator (e.g. `--filterrag_slm_device
+    mps`/`auto` resolving to `mps`) would be called with CPU tensors from
+    `tokenizer(..., return_tensors="pt")`, which raises a device-mismatch
+    `RuntimeError` inside `model(...)` -- this is a real bug fix, not a
+    silent-fallback path: a device-mismatch failure must surface as an
+    exception here, never degrade to `slm_answer_logprob=0.0`.
     """
     if not answer_text or not answer_text.strip():
         return 0.0, 0
@@ -248,6 +257,11 @@ def slm_answer_joint_logprob(
     n = int(label_ids.numel())
     if n == 0:
         return 0.0, 0
+
+    device = next(model.parameters()).device
+    encoder_inputs = {k: v.to(device) for k, v in encoder_inputs.items()}
+    label_ids = label_ids.to(device)
+
     with torch.no_grad():
         outputs = model(**encoder_inputs, labels=label_ids)
     loss = float(outputs.loss.item())
