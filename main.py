@@ -20,6 +20,8 @@ from defense.dispatch import DEFENSE_CHOICES, run_defense
 from defense.filterrag import DEFAULT_EPSILON as FILTERRAG_DEFAULT_EPSILON
 from defense.filterrag import DEFAULT_SEMANTIC_THRESHOLD as FILTERRAG_DEFAULT_SEMANTIC_THRESHOLD
 from defense.filterrag import VALID_MATCHING_MODES as FILTERRAG_VALID_MATCHING_MODES
+from defense.ml_filterrag import DEFAULT_LM_MODEL as ML_FILTERRAG_DEFAULT_LM_MODEL
+from defense.ml_filterrag import DEFAULT_THRESHOLD as ML_FILTERRAG_DEFAULT_THRESHOLD
 from defense.passages import label_passages
 from defense.passages import texts as passage_texts
 from defense.diagnostics import (
@@ -164,6 +166,62 @@ def parse_args():
             "Cosine-similarity threshold for --filterrag_matching_mode semantic "
             "(paper default 0.6, sentence-transformers/all-MiniLM-L6-v2). "
             "Unused when --filterrag_matching_mode exact."
+        ),
+    )
+    parser.add_argument(
+        "--ml_filterrag_model_path",
+        type=str,
+        default=None,
+        help=(
+            "Path to a trained MLFilterRAGClassifier artifact (joblib), as produced by "
+            "scripts/train_ml_filterrag.py. Required (validated inside run_defense/"
+            "dispatch, not here) when --defense ml_filterrag; unused otherwise. See "
+            "defense/ml_filterrag.py ('ML-FilterRAG-top-k' MVP of Edemacu et al. 2025 "
+            "Algorithm 2) and docs/ML_FILTERRAG_IMPLEMENTATION_PLAN.md."
+        ),
+    )
+    parser.add_argument(
+        "--ml_filterrag_threshold",
+        type=float,
+        default=ML_FILTERRAG_DEFAULT_THRESHOLD,
+        help=(
+            "Inference-time probability threshold for --defense ml_filterrag: a passage "
+            "is removed iff its predicted P(is_poison) >= this value (default 0.5), "
+            "independent of whatever threshold was used to report training-time metrics."
+        ),
+    )
+    parser.add_argument(
+        "--ml_filterrag_lm_model",
+        type=str,
+        default=ML_FILTERRAG_DEFAULT_LM_MODEL,
+        help=(
+            "HF causal-LM model name used to score perplexity(dj) for --defense "
+            "ml_filterrag (default distilgpt2). The paper doesn't specify a perplexity "
+            "model -- this is a repo proxy, see docs/ML_FILTERRAG_IMPLEMENTATION_PLAN.md."
+        ),
+    )
+    parser.add_argument(
+        "--ml_filterrag_matching_mode",
+        type=str,
+        default="semantic",
+        choices=list(FILTERRAG_VALID_MATCHING_MODES),
+        help=(
+            "Keyword-to-passage-word matching mode for ml_filterrag's Freq-Density "
+            "features (same mechanism as --filterrag_matching_mode, reusing "
+            "defense/filterrag.py's freq_density_detailed()). Default 'semantic' -- "
+            "unlike --filterrag_matching_mode, there is no pre-existing ml_filterrag "
+            "behavior to stay backward-compatible with, so this defaults straight to "
+            "the paper-faithful mode (Section III-B2)."
+        ),
+    )
+    parser.add_argument(
+        "--ml_filterrag_semantic_threshold",
+        type=float,
+        default=FILTERRAG_DEFAULT_SEMANTIC_THRESHOLD,
+        help=(
+            "Cosine-similarity threshold for --ml_filterrag_matching_mode semantic "
+            "(paper default 0.6, sentence-transformers/all-MiniLM-L6-v2). Unused when "
+            "--ml_filterrag_matching_mode exact."
         ),
     )
 
@@ -387,6 +445,11 @@ def main():
                         filterrag_slm_device=args.filterrag_slm_device,
                         filterrag_matching_mode=args.filterrag_matching_mode,
                         filterrag_semantic_threshold=args.filterrag_semantic_threshold,
+                        ml_filterrag_model_path=args.ml_filterrag_model_path,
+                        ml_filterrag_threshold=args.ml_filterrag_threshold,
+                        ml_filterrag_matching_mode=args.ml_filterrag_matching_mode,
+                        ml_filterrag_semantic_threshold=args.ml_filterrag_semantic_threshold,
+                        ml_filterrag_lm_model=args.ml_filterrag_lm_model,
                     )
                 latency_defense_sec = _dt["elapsed_sec"]
                 topk_contents = passage_texts(kept_passages)

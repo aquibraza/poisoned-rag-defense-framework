@@ -3,8 +3,8 @@
 Lightweight `unittest`-based tests for the RAGDefender diagnostics work
 (`defense/passages.py`, `defense/diagnostics.py`, `defense/controls.py`,
 `defense/dispatch.py`, `defense/asr_match.py`, `defense/filterrag.py`,
-`scripts/summarize_ragdefender_diagnostics.py`, and `main.py`'s FilterRAG
-CLI flags).
+`defense/ml_filterrag.py`, `scripts/summarize_ragdefender_diagnostics.py`,
+and `main.py`'s FilterRAG/ML-FilterRAG-top-k CLI flags).
 `pytest` is intentionally not used since it is not already a project
 dependency; everything here runs with the Python standard library.
 
@@ -65,6 +65,19 @@ dataset access, no dataset files on disk required) -- it only exercises
 `argparse` plus a source-level string check that `main.py`'s
 `run_defense(...)` call site forwards the new CLI args through.
 
+`test_ml_filterrag.py` (`defense/ml_filterrag.py`, the "ML-FilterRAG-top-k"
+MVP -- Edemacu et al. 2025, Algorithm 2/Section III-B2) has **no
+third-party model-download dependency**: it never imports/loads a real
+`transformers`/`torch` model. Perplexity (`CausalLMScorer`) and the SLM
+joint-log-probability conversion (`slm_answer_joint_logprob`) are both
+exercised via dependency-free fakes (`FakeCausalLM`/`FakeCausalTokenizer`,
+`FakeSeq2SeqModel`/`FakeSeq2SeqTokenizer`), mirroring `test_filterrag.py`'s
+existing fake-model pattern; only `sklearn.ensemble.RandomForestClassifier`
+(already a `requirements.txt` dependency) is used for real in the
+classifier round-trip tests. `test_main_cli_ml_filterrag.py` follows
+`test_main_cli_filterrag.py`'s same pattern/dependency footprint for the
+new `--ml_filterrag_*` CLI flags.
+
 None of the tests here make any LLM/API call (no GPT-4, no PaLM, no
 Vicuna) or require GPU access.
 
@@ -96,6 +109,14 @@ Vicuna) or require GPU access.
   forwarded through `run_defense()` for both `filterrag_query_only` and
   (mocked-SLM) `filterrag`, `exact` remains the dispatch-level default, and
   a synonym-stuffed passage is only caught in `semantic` mode (not `exact`).
+  Also covers `--defense ml_filterrag` end-to-end through the same
+  `run_defense()` entry point (classifier and SLM both mocked/loaded via a
+  fake `load_classifier_cached`, so no real model load or download
+  happens): removes exactly the passages a fake classifier predicts poison,
+  removes nothing when the fake classifier flags nothing, `ml_filterrag` is
+  a member of `DEFENSE_CHOICES`, and a missing/empty
+  `ml_filterrag_model_path` raises `ValueError` immediately (before any
+  feature extraction is attempted).
 - `test_filterrag.py` -- `freq_density()` scores keyword-stuffed passages
   higher than unrelated ones (case-insensitive, no double-counting of
   duplicate keywords); `score_passages()`/`filterrag_defense()` behave
@@ -136,6 +157,47 @@ Vicuna) or require GPU access.
   (default `exact`, choices `exact`/`semantic`, rejects invalid values) and
   `--filterrag_semantic_threshold` (default 0.6, matching the paper) parse
   correctly, and are forwarded into the `run_defense(...)` call site.
+- `test_ml_filterrag.py` -- `defense/ml_filterrag.py` ("ML-FilterRAG-top-k"
+  MVP): `DEFAULT_FEATURE_NAMES` is exactly the 4 paper-cited features
+  (`freq_density_score`, `matched_freq_sum`, `perplexity`,
+  `slm_answer_logprob`) with no overlap with `AUXILIARY_FEATURE_NAMES`;
+  `freq_density_detailed()`'s new `matched_freq_sum` key is additive (every
+  pre-existing key/value is unaffected, verified against the raw
+  numerator); `extract_features()`'s semantic Freq-Density values are
+  byte-identical to calling `freq_density_detailed()` directly (proves no
+  reimplementation drift); `CausalLMScorer.perplexity()` is deterministic
+  given a fake fixed-loss causal LM, and degrades to a documented `1.0`
+  fallback for empty/single-token text; a dedicated pinning test asserts
+  `slm_answer_joint_logprob()`'s conversion is exactly `-loss * n` (never
+  the raw loss, never `-loss` alone) against a fake encoder-decoder model
+  with a known loss/token count; every `extract_features()` feature value
+  is finite for normal/empty passages, and a missing
+  `slm_logprob_model`/`slm_logprob_tokenizer` degrades to
+  `slm_answer_logprob=0.0` with a one-time warning; `features_to_matrix()`
+  produces columns in exactly the requested `feature_names` order and
+  raises `KeyError` for a misspelled name; `query_level_train_test_split()`
+  is deterministic per seed with zero train/test overlap, and
+  `assert_no_query_id_leakage()` raises on a synthetic overlapping split;
+  `MLFilterRAGClassifier.train()`/`predict_proba()`/`predict()`/`save()`/
+  `load()` round-trip exactly on synthetic data, `model_type="xgboost"`
+  raises a clear `ImportError` when `xgboost` isn't installed (simulated
+  via `sys.modules` patching) while `model_type="random_forest"` is
+  unaffected, and loading a malformed/incomplete artifact raises `ValueError`;
+  `paper_aligned_model_type()` matches Appendix C, Table VI exactly
+  (Random Forest for HotpotQA/MS-MARCO, XGBoost for NQ); `ml_filterrag_defense()`
+  removes exactly the passages a fake classifier predicts poison, at a
+  configurable threshold, with the documented `diag_extra` shape; and no
+  GPT/PaLM/Vicuna/Cohere API import or actual `llm.query()` call exists
+  anywhere in `defense/ml_filterrag.py` (a docstring mention of
+  `` `llm.query()` `` doesn't count as a call).
+- `test_main_cli_ml_filterrag.py` -- `main.py`'s `--ml_filterrag_model_path`,
+  `--ml_filterrag_threshold` (default 0.5), `--ml_filterrag_lm_model`
+  (default `distilgpt2`), `--ml_filterrag_matching_mode` (default
+  `semantic` -- paper-faithful by default, unlike `--filterrag_matching_mode`'s
+  backward-compatible `exact` default; rejects invalid values), and
+  `--ml_filterrag_semantic_threshold` (default 0.6) all parse correctly and
+  are forwarded into the `run_defense(...)` call site; `ml_filterrag` is a
+  valid `--defense` choice.
 - `test_summarizer.py` -- aggregation, CSV/Markdown report rendering
   (including the interpretation decision tree) against fake JSONL fixtures.
 - `test_existing_results_compat.py` -- pre-existing files under

@@ -16,6 +16,10 @@ diagnostics without touching `defense/defense_runner.py`:
 - `filterrag` / `filterrag_query_only` delegate to `defense/filterrag.py`
   (Edemacu et al. 2025 baseline; a second, independent defense family from
   RAGDefender, so its own failure modes and comparisons are meaningful).
+- `ml_filterrag` delegates to `defense/ml_filterrag.py` -- the supervised
+  ML-FilterRAG-top-k MVP (Algorithm 2, same paper); reuses filterrag's
+  `aj`-generation SLM flags for its own `slm_answer_fn`, see module
+  docstring there and `docs/ML_FILTERRAG_IMPLEMENTATION_PLAN.md`.
 - `none` is a pass-through.
 """
 from __future__ import annotations
@@ -31,6 +35,13 @@ from defense.filterrag import (
     filterrag_defense,
     local_hf_slm_answer_fn,
 )
+from defense.ml_filterrag import (
+    DEFAULT_LM_MODEL as ML_FILTERRAG_DEFAULT_LM_MODEL,
+    DEFAULT_THRESHOLD as ML_FILTERRAG_DEFAULT_THRESHOLD,
+    get_slm_model_and_tokenizer,
+    load_classifier_cached,
+    ml_filterrag_defense,
+)
 from defense.passages import RetrievedPassage
 
 # Canonical set of values accepted by --defense in main.py.
@@ -42,6 +53,7 @@ DEFENSE_CHOICES = (
     "random_remove_same_count",
     "filterrag",
     "filterrag_query_only",
+    "ml_filterrag",
 )
 
 # Defenses that are diagnostic ablations of filterrag, not the published
@@ -150,6 +162,11 @@ def run_defense(
     filterrag_slm_device: str = "auto",
     filterrag_matching_mode: str = "exact",
     filterrag_semantic_threshold: float = DEFAULT_SEMANTIC_THRESHOLD,
+    ml_filterrag_model_path: Optional[str] = None,
+    ml_filterrag_threshold: float = ML_FILTERRAG_DEFAULT_THRESHOLD,
+    ml_filterrag_matching_mode: str = "semantic",
+    ml_filterrag_semantic_threshold: float = DEFAULT_SEMANTIC_THRESHOLD,
+    ml_filterrag_lm_model: str = ML_FILTERRAG_DEFAULT_LM_MODEL,
 ) -> Tuple[List[RetrievedPassage], Dict]:
     """Apply `defense_name` to `passages` and return (kept_passages, diag_extra).
 
@@ -171,8 +188,18 @@ def run_defense(
     `filterrag_matching_mode="semantic"` is the paper-faithful mode (see
     docs/FILTERRAG_FIDELITY_AUDIT.md) and applies to both `filterrag` and
     `filterrag_query_only` (matching mode and SLM-vs-query-only are
-    orthogonal knobs -- `filterrag_query_only` is never paper-faithful
+    orthogonal knobs --     `filterrag_query_only` is never paper-faithful
     either way, since it always skips the SLM step).
+
+    `ml_filterrag_model_path`/`ml_filterrag_threshold`/
+    `ml_filterrag_matching_mode`/`ml_filterrag_semantic_threshold`/
+    `ml_filterrag_lm_model` only apply to `ml_filterrag` -- see
+    defense/ml_filterrag.py ("ML-FilterRAG-top-k" MVP). `ml_filterrag`
+    reuses `filterrag_slm_model`/`filterrag_slm_device` for its own `aj`
+    generation (no separate `ml_filterrag_slm_*` flags -- see
+    docs/ML_FILTERRAG_IMPLEMENTATION_PLAN.md sec 9). A missing/invalid
+    `ml_filterrag_model_path` raises immediately (ValueError/
+    FileNotFoundError), before any feature extraction is attempted.
     """
     name = (defense_name or "none").lower()
 
@@ -214,6 +241,32 @@ def run_defense(
             slm_answer_fn=slm_answer_fn,
             matching_mode=filterrag_matching_mode,
             semantic_threshold=filterrag_semantic_threshold,
+        )
+
+    if name == "ml_filterrag":
+        if not ml_filterrag_model_path:
+            raise ValueError(
+                "--ml_filterrag_model_path is required for --defense ml_filterrag "
+                "(train one first with scripts/train_ml_filterrag.py)."
+            )
+        classifier = load_classifier_cached(ml_filterrag_model_path)
+        slm_answer_fn = local_hf_slm_answer_fn(filterrag_slm_model, device=filterrag_slm_device)
+        slm_model, slm_tokenizer = get_slm_model_and_tokenizer(
+            filterrag_slm_model, device=filterrag_slm_device
+        )
+        return ml_filterrag_defense(
+            query,
+            passages,
+            classifier=classifier,
+            threshold=ml_filterrag_threshold,
+            slm_answer_fn=slm_answer_fn,
+            slm_logprob_model=slm_model,
+            slm_logprob_tokenizer=slm_tokenizer,
+            slm_model_name=filterrag_slm_model,
+            matching_mode=ml_filterrag_matching_mode,
+            semantic_threshold=ml_filterrag_semantic_threshold,
+            lm_model_name=ml_filterrag_lm_model,
+            model_path_for_diagnostics=ml_filterrag_model_path,
         )
 
     raise ValueError(

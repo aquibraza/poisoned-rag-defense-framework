@@ -45,11 +45,15 @@ from ~82-90% (no defense) to **2-9%** across NQ/HotpotQA/MS MARCO while
 keeping ~81-90% accuracy -- see `docs/ANALYSIS.md` §5c for the full table.
 
 **ML-FilterRAG** (Freq-Density + perplexity + log-probability -> a trained
-XGBoost/Random Forest classifier) is **not implemented here**. It requires
-labeled poison/clean training data and a training pipeline, which is a
-separate, heavier lift; like `ragdefender_fixed`, it is deferred until after
-the threshold-based `filterrag` baseline has been diagnosed. See "Deferred
-work" below.
+XGBoost/Random Forest classifier) is now implemented as the
+**"ML-FilterRAG-top-k" MVP** -- `--defense ml_filterrag`,
+`defense/ml_filterrag.py`. "top-k" (not bare "ML-FilterRAG") because this
+repo's harness retrieves `top_k` directly rather than the paper's oversized
+`top-s -> filter -> top-k` pipeline. See
+`docs/ML_FILTERRAG_IMPLEMENTATION_PLAN.md` for the full paper-fidelity
+audit, feature/classifier design, and paper-faithful-vs-proxy summary; see
+"Deferred work" below for what's still not built (a `top-s` retrieval
+harness, and a GPT-4o-augmented training set).
 
 ## 2. What's implemented in this repo
 
@@ -209,7 +213,9 @@ the SLM step regardless of matching mode.
   default stays `exact` for backward compatibility with runs/scripts
   written before this option existed, so paper-fidelity runs must opt in
   explicitly.
-- **ML-FilterRAG is out of scope** (see "Deferred work").
+- **ML-FilterRAG-top-k (MVP) is now implemented** -- see
+  `docs/ML_FILTERRAG_IMPLEMENTATION_PLAN.md` and "Deferred work" below for
+  what's still not built.
 - **Epsilon is not re-tuned for `flan-t5-small`**: the paper's `epsilon=0.2`
   was presumably tuned against LLaMA-2/3-generated `SLM_answer` text; with a
   much smaller substitute SLM, the "right" threshold for this repo's setup
@@ -315,13 +321,33 @@ the equivalent RAGDefender run, especially at higher `k`.
 
 ## 5. Deferred work
 
-- **ML-FilterRAG**: needs a labeled poison/clean training set (can be built
-  from this repo's own ground-truth `is_poison` labels) plus a
-  perplexity/log-probability feature extractor and a trained
-  XGBoost/Random Forest classifier. Left for a follow-up once the
-  threshold-based `filterrag` baseline's diagnostics have been reviewed --
-  same "diagnose before you build the next thing" discipline applied to
-  RAGDefender's `ragdefender_fixed`.
+- **ML-FilterRAG-top-k (MVP) is implemented** (`--defense ml_filterrag`,
+  `defense/ml_filterrag.py`, `scripts/build_ml_filterrag_dataset.py`,
+  `scripts/train_ml_filterrag.py`, `scripts/evaluate_ml_filterrag.py`) --
+  see `docs/ML_FILTERRAG_IMPLEMENTATION_PLAN.md` for the full design,
+  paper-fidelity audit, and paper-faithful-vs-proxy summary table. What's
+  still **not** built, i.e. still deferred:
+  - **A `top-s` retrieval harness**: the paper retrieves an oversized
+    `top-s` candidate pool, classifies every candidate, then takes `top-k`
+    survivors for the LLM (Algorithm 2). This repo's harness (`main.py`)
+    only ever retrieves exactly `top_k` directly -- the same gap already
+    flagged for threshold FilterRAG (§3.3 of
+    `docs/FILTERRAG_FIDELITY_AUDIT.md`). Until this harness exists, every
+    result from this module must be labeled "ML-FilterRAG-top-k," never
+    bare "ML-FilterRAG."
+  - **A GPT-4o-augmented training set**: the paper trains on GPT-4o-generated
+    *additional* adversarial texts; this repo's dataset builder is
+    restricted to this repo's existing ground-truth `is_poison` labels on
+    the original offline-generated (`LM_targeted`/`hotflip`) adversarial
+    texts only, per this task's no-GPT/API-call constraint -- a real
+    fidelity gap (smaller/less diverse poison-text distribution), not
+    hidden.
+  - **A trained model artifact checked into the repo / a live evaluation
+    run**: `scripts/train_ml_filterrag.py`/`scripts/evaluate_ml_filterrag.py`
+    exist and are unit-/smoke-tested, but no full dataset build + training
+    + evaluation run has been executed yet against real HotpotQA/MS-MARCO/NQ
+    data at scale -- that is the natural next step, not part of this MVP's
+    scope.
 - **Decision tree generalization**: `render_decision_tree()` in
   `scripts/summarize_ragdefender_diagnostics.py` is currently written
   specifically for RAGDefender's saturation hypothesis (H1-H5 in

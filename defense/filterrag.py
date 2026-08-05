@@ -125,12 +125,21 @@ def freq_density_detailed(
       `get_semantic_word_matcher()`) -- `sentence_transformers` is only
       ever imported the first time this path actually runs.
 
-    Returns a dict with keys `freq_density_score`, `unique_word_count`,
-    `matched_keyword_count`, `matched_keywords` (the *keywords* -- not
-    passage words -- that had at least one match; deduplicated, not
-    capped here, callers may cap for display), `matching_mode`, and
-    `semantic_threshold` (`None` when `matching_mode="exact"`, since the
-    threshold is meaningless there).
+    Returns a dict with keys `freq_density_score`, `matched_freq_sum`,
+    `unique_word_count`, `matched_keyword_count`, `matched_keywords` (the
+    *keywords* -- not passage words -- that had at least one match;
+    deduplicated, not capped here, callers may cap for display),
+    `matching_mode`, and `semantic_threshold` (`None` when
+    `matching_mode="exact"`, since the threshold is meaningless there).
+
+    `matched_freq_sum` is the raw Freq-Density *numerator* alone (i.e.
+    `freq_density_score * unique_word_count`, before dividing by
+    `UniqueWords(dj)`) -- added for ML-FilterRAG (Edemacu et al. 2025,
+    Section III-B2), which uses this exact quantity ("sum of frequencies
+    of semantically similar words between (qi⊕aj) and dj") as a feature
+    distinct from the Freq-Density ratio itself. Purely additive: every
+    pre-existing key/behavior of this function is unchanged. See
+    `defense/ml_filterrag.py` and `docs/ML_FILTERRAG_IMPLEMENTATION_PLAN.md`.
 
     Returns an all-zero/empty breakdown for a passage with no tokens at all,
     or an empty `keywords` sequence (avoids a division-by-zero; there's no
@@ -147,6 +156,7 @@ def freq_density_detailed(
     if unique_word_count == 0 or not keyword_list:
         return {
             "freq_density_score": 0.0,
+            "matched_freq_sum": 0,
             "unique_word_count": unique_word_count,
             "matched_keyword_count": 0,
             "matched_keywords": [],
@@ -172,6 +182,7 @@ def freq_density_detailed(
 
     return {
         "freq_density_score": total_freq / unique_word_count,
+        "matched_freq_sum": total_freq,
         "unique_word_count": unique_word_count,
         "matched_keyword_count": len(matched_keywords),
         "matched_keywords": matched_keywords,

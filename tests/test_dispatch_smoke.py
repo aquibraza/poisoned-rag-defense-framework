@@ -5,7 +5,9 @@ network download, so these tests monkeypatch `defense_runner._get_s_model`
 with a deterministic fake encoder. This proves that `none`,
 `ragdefender_original`, `oracle_remove_all_poison`, and
 `random_remove_same_count` all run end-to-end through the dispatcher without
-any network access or LLM/API call.
+any network access or LLM/API call. `ml_filterrag` is exercised with a fake
+`MLFilterRAGClassifier` stand-in (via mocking `dispatch.load_classifier_cached`)
+and mocked SLM/perplexity helpers -- see `TestMlFilterragThroughDispatch`.
 
 Run with: python -m unittest tests.test_dispatch_smoke -v
 """
@@ -21,6 +23,7 @@ import torch
 
 from defense import defense_runner, dispatch
 from defense import filterrag as filterrag_module
+from defense import ml_filterrag as ml_filterrag_module
 from defense.passages import count_poison_clean, label_passages
 
 
@@ -255,6 +258,88 @@ class TestFilterragMatchingModeThroughDispatch(unittest.TestCase):
         self.assertIn("semantic_threshold=0.42", diag["notes"])
         for s in diag["filterrag_scores"]:
             self.assertEqual(s["slm_answer"], "an answer")  # SLM step actually ran
+
+
+class TestMlFilterragThroughDispatch(unittest.TestCase):
+    """--defense ml_filterrag, exercised fully offline: local_hf_slm_answer_fn
+    and get_slm_model_and_tokenizer are mocked (no real transformers model
+    loaded/downloaded), and the classifier is a fake stand-in for
+    MLFilterRAGClassifier -- load_classifier_cached is mocked to return it
+    directly, so no real joblib artifact is read from disk either."""
+
+    def _passages(self):
+        raw = [
+            {"doc_id": "clean1", "context": "Some unrelated clean fact about the world.", "score": 0.9, "source": "corpus", "is_poison": False},
+            {"doc_id": "adv1", "context": "texas texas texas texas is the state texas.", "score": 0.85, "source": "adversarial", "is_poison": True},
+        ]
+        return label_passages(raw)
+
+    def _fake_classifier(self, poison_doc_ids, passages):
+        class _Clf:
+            feature_names = ml_filterrag_module.DEFAULT_FEATURE_NAMES
+            model_type = "random_forest"
+            training_meta = {}
+            threshold_default = 0.5
+
+            def predict_proba(self, X):
+                import numpy as np
+
+                order = [p.doc_id for p in passages]
+                return np.array([1.0 if did in poison_doc_ids else 0.0 for did in order])
+
+        return _Clf()
+
+    def test_removes_exactly_fake_predicted_poison_passages(self):
+        passages = self._passages()
+        fake_clf = self._fake_classifier({"adv1"}, passages)
+        fake_semantic_matcher = FakeSemanticMatcher({})
+        with mock.patch.object(dispatch, "load_classifier_cached", return_value=fake_clf), \
+             mock.patch.object(dispatch, "local_hf_slm_answer_fn", return_value=lambda q, p: "an answer"), \
+             mock.patch.object(dispatch, "get_slm_model_and_tokenizer", return_value=(None, None)), \
+             mock.patch.object(ml_filterrag_module, "get_semantic_word_matcher", return_value=fake_semantic_matcher), \
+             mock.patch.object(ml_filterrag_module, "get_causal_lm_scorer") as mock_scorer:
+            mock_scorer.return_value.perplexity.return_value = 10.0
+            kept, diag = dispatch.run_defense(
+                "ml_filterrag", "Where is texas?", passages, "hotpotqa",
+                ml_filterrag_model_path="/fake/path/model.joblib",
+            )
+        kept_ids = {p.doc_id for p in kept}
+        self.assertEqual(kept_ids, {"clean1"})
+        self.assertEqual(diag["N_adv_estimated_by_ragdefender"], 1)
+        self.assertEqual(diag["model_path"], "/fake/path/model.joblib")
+        self.assertIn("ml_filterrag_predictions", diag)
+
+    def test_nothing_removed_when_classifier_flags_nothing(self):
+        passages = self._passages()
+        fake_clf = self._fake_classifier(set(), passages)
+        fake_semantic_matcher = FakeSemanticMatcher({})
+        with mock.patch.object(dispatch, "load_classifier_cached", return_value=fake_clf), \
+             mock.patch.object(dispatch, "local_hf_slm_answer_fn", return_value=lambda q, p: "an answer"), \
+             mock.patch.object(dispatch, "get_slm_model_and_tokenizer", return_value=(None, None)), \
+             mock.patch.object(ml_filterrag_module, "get_semantic_word_matcher", return_value=fake_semantic_matcher), \
+             mock.patch.object(ml_filterrag_module, "get_causal_lm_scorer") as mock_scorer:
+            mock_scorer.return_value.perplexity.return_value = 10.0
+            kept, diag = dispatch.run_defense(
+                "ml_filterrag", "Where is texas?", passages, "hotpotqa",
+                ml_filterrag_model_path="/fake/path/model.joblib",
+            )
+        self.assertEqual(len(kept), len(passages))
+        self.assertEqual(diag["N_adv_estimated_by_ragdefender"], 0)
+
+    def test_missing_model_path_raises_value_error(self):
+        passages = self._passages()
+        with self.assertRaises(ValueError):
+            dispatch.run_defense("ml_filterrag", "Where is texas?", passages, "hotpotqa")
+
+    def test_empty_string_model_path_raises_value_error(self):
+        passages = self._passages()
+        with self.assertRaises(ValueError):
+            dispatch.run_defense(
+                "ml_filterrag", "Where is texas?", passages, "hotpotqa", ml_filterrag_model_path=""
+            )
+
+    def test_ml_filterrag_in_defense_choices(self):
+        self.assertIn("ml_filterrag", dispatch.DEFENSE_CHOICES)
 
 
 class TestUnknownDefenseRaises(unittest.TestCase):

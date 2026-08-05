@@ -182,6 +182,11 @@ results/
 # results/beir_results/
 # results/adv_targeted_results/
 
+# ML-FilterRAG-top-k trained model artifacts (joblib; regenerate via
+# scripts/train_ml_filterrag.py, do not commit -- see
+# docs/ML_FILTERRAG_IMPLEMENTATION_PLAN.md)
+models/
+
 # RAGDefender generated cluster visualization artifacts
 # results/diagnostics/ragdefender_cluster_viz/
 # results/diagnostics/cluster_normalized_poisoning/
