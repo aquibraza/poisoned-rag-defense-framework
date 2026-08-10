@@ -25,11 +25,23 @@ for this MVP script; see `docs/ML_FILTERRAG_IMPLEMENTATION_PLAN.md` sec 6).
 results/diagnostics/ml_filterrag_dataset_<...>/dataset_config.json` (written
 by `scripts/build_ml_filterrag_dataset.py`) to restrict evaluation strictly
 to that dataset's `test_query_ids` -- i.e. `query_id`s never used to train
-the classifier being evaluated. Without `--held_out_config`, this script
-prints an explicit warning and simply evaluates the first `--max_queries`
-queries, with **no guarantee** they were excluded from any particular
-model's training set -- the caller is responsible for that guarantee in
-that case.
+the classifier being evaluated. This reconstructs the *exact same*
+adversarial candidate pool (`target_query_ids`, the dataset's full
+`--max_queries` query set, not just `test_query_ids`) that
+`build_ml_filterrag_dataset.py` used, before restricting the actual
+scoring/metrics to just the held-out subset -- see
+`resolve_query_id_pools()`'s docstring for why this distinction matters:
+`Attacker.get_attack()` batches every pool query together and any pool
+query's adversarial text can end up in *any other* pool query's retrieved
+top-k, so evaluating with a narrower pool than the one used to build the
+dataset silently changes which passages are retrieved/labeled poison for
+the held-out queries, relative to that dataset's own `features.csv`. Older
+`dataset_config.json` files (predating `target_query_ids`) are handled by
+reconstructing the pool from their `max_queries` field, with a warning.
+Without `--held_out_config`, this script prints an explicit warning and
+simply evaluates the first `--max_queries` queries, with **no guarantee**
+they were excluded from any particular model's training set -- the caller
+is responsible for that guarantee in that case.
 
 Usage:
     python scripts/evaluate_ml_filterrag.py \\
@@ -43,7 +55,7 @@ import json
 import os
 import sys
 import time
-from typing import Dict, List
+from typing import Dict, List, Tuple
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO_ROOT not in sys.path:
@@ -117,30 +129,90 @@ def parse_args():
     return parser.parse_args()
 
 
-def resolve_target_query_ids(args, incorrect_answers: List[Dict]) -> List[int]:
-    """Return indices into `incorrect_answers` for the queries to evaluate."""
+def resolve_query_id_pools(args, incorrect_answers: List[Dict]) -> Tuple[List[str], List[str]]:
+    """Return `(full_pool_query_ids, eval_query_ids)`, both ordered lists of
+    `query_id` strings (not indices).
+
+    `full_pool_query_ids` is the *exact* adversarial candidate pool that
+    must be fed to `Attacker.get_attack()` -- see
+    `scripts/build_ml_filterrag_dataset.py::build_feature_rows()`'s
+    docstring: `Attacker.get_attack(target_queries)` is called once per
+    pool with every pool query, and every resulting adversarial text is
+    then scored against *every* pool query's own embedding, so a query's
+    retrieved top-k composition depends on which *other* queries share its
+    pool. Reconstructing this pool as just the held-out subset (as an
+    earlier version of this function did) silently changes which
+    passages are retrieved/labeled for those held-out queries relative to
+    the dataset that was actually built -- see
+    docs/ML_FILTERRAG_FIDELITY notes in `docs/ML_FILTERRAG_IMPLEMENTATION_PLAN.md`
+    and the `--held_out_config` module docstring above.
+
+    `eval_query_ids` is the (usually much smaller) subset of
+    `full_pool_query_ids` this run actually scores/reports metrics for --
+    the held-out `test_query_ids` when `--held_out_config` is given, else
+    the full pool itself (unchanged from before: with no config, there is
+    no train/test distinction to make).
+    """
     if args.held_out_config:
         with open(args.held_out_config, "r", encoding="utf-8") as f:
             held_out_cfg = json.load(f)
         test_query_ids = set(held_out_cfg.get("test_query_ids", []))
         if not test_query_ids:
             raise ValueError(f"--held_out_config {args.held_out_config!r} has an empty 'test_query_ids' list.")
+
+        full_pool_query_ids = held_out_cfg.get("target_query_ids")
+        if full_pool_query_ids is None:
+            max_queries_in_config = held_out_cfg.get("max_queries")
+            if max_queries_in_config is None:
+                raise ValueError(
+                    f"--held_out_config {args.held_out_config!r} has neither 'target_query_ids' "
+                    "nor 'max_queries' -- cannot reconstruct the exact adversarial candidate pool "
+                    "used to build that dataset (see resolve_query_id_pools() docstring for why "
+                    "this matters -- a held-out subset alone is NOT equivalent). Rebuild the "
+                    "dataset with the current scripts/build_ml_filterrag_dataset.py (which writes "
+                    "'target_query_ids'), then re-point --held_out_config at the new "
+                    "dataset_config.json."
+                )
+            print(
+                f"[evaluate_ml_filterrag] WARNING: --held_out_config {args.held_out_config!r} "
+                "predates 'target_query_ids' -- reconstructing the full candidate pool as the "
+                f"first max_queries={max_queries_in_config} queries from "
+                f"results/adv_targeted_results/{args.eval_dataset}.json, exactly as the dataset "
+                "builder did at build time. If that file has changed since the dataset was built, "
+                "this reconstruction will NOT match and retrieved-passage counts may still "
+                "disagree with the dataset's features.csv -- rebuild the dataset if in doubt."
+            )
+            full_pool_query_ids = [ia["id"] for ia in incorrect_answers[:max_queries_in_config]]
+
+        missing_from_pool = test_query_ids - set(full_pool_query_ids)
+        if missing_from_pool:
+            raise ValueError(
+                f"--held_out_config {args.held_out_config!r} is inconsistent: {len(missing_from_pool)} "
+                f"'test_query_ids' entr(y/ies) are not present in its own 'target_query_ids' "
+                f"(or the max_queries-based reconstruction of them): {sorted(missing_from_pool)[:5]}... "
+                "-- rebuild the dataset."
+            )
+
         id_to_idx = {ia["id"]: i for i, ia in enumerate(incorrect_answers)}
-        indices = [id_to_idx[qid] for qid in sorted(test_query_ids) if qid in id_to_idx]
-        missing = test_query_ids - set(id_to_idx)
+        missing = [qid for qid in full_pool_query_ids if qid not in id_to_idx]
         if missing:
             print(
-                f"[evaluate_ml_filterrag] WARNING: {len(missing)} held-out query_id(s) from "
+                f"[evaluate_ml_filterrag] WARNING: {len(missing)} candidate-pool query_id(s) from "
                 f"--held_out_config not found in this dataset's incorrect_answers file, skipped: "
-                f"{sorted(missing)[:5]}..."
+                f"{missing[:5]}..."
             )
-        if args.max_queries and len(indices) > args.max_queries:
-            indices = indices[: args.max_queries]
+        full_pool_query_ids = [qid for qid in full_pool_query_ids if qid in id_to_idx]
+
+        eval_query_ids = [qid for qid in full_pool_query_ids if qid in test_query_ids]
+        if args.max_queries and len(eval_query_ids) > args.max_queries:
+            eval_query_ids = eval_query_ids[: args.max_queries]
+
         print(
-            f"[evaluate_ml_filterrag] evaluating on {len(indices)} held-out query_id(s) from "
-            f"{args.held_out_config!r} (genuinely excluded from that dataset's training split)."
+            f"[evaluate_ml_filterrag] reconstructed a {len(full_pool_query_ids)}-query-id adversarial "
+            f"candidate pool (matching the dataset build); evaluating {len(eval_query_ids)} held-out "
+            f"test query_id(s) from it (genuinely excluded from that dataset's training split)."
         )
-        return indices
+        return full_pool_query_ids, eval_query_ids
 
     print(
         "[evaluate_ml_filterrag] WARNING: no --held_out_config given -- evaluating the first "
@@ -148,7 +220,8 @@ def resolve_target_query_ids(args, incorrect_answers: List[Dict]) -> List[int]:
         "from the ml_filterrag model's training set. Pass --held_out_config for a genuine "
         "held-out comparison."
     )
-    return list(range(args.max_queries))
+    ids = [ia["id"] for ia in incorrect_answers[: args.max_queries]]
+    return ids, ids
 
 
 def _pooled_metrics(records: List[Dict]) -> Dict:
@@ -192,9 +265,13 @@ def run_evaluation(args) -> Dict:
     with open(beir_results_path, "r") as f:
         results = json.load(f)
 
-    target_queries_idx = resolve_target_query_ids(args, incorrect_answers)
-    if not target_queries_idx:
+    full_pool_query_ids, eval_query_ids = resolve_query_id_pools(args, incorrect_answers)
+    if not eval_query_ids:
         raise ValueError("No target queries resolved -- check --held_out_config / --max_queries.")
+
+    id_to_idx = {ia["id"]: i for i, ia in enumerate(incorrect_answers)}
+    pool_idx = [id_to_idx[qid] for qid in full_pool_query_ids]
+    eval_idx = [id_to_idx[qid] for qid in eval_query_ids]
 
     model, c_model, tokenizer, get_emb = load_models(args.eval_model_code)
     model.eval()
@@ -214,8 +291,13 @@ def run_evaluation(args) -> Dict:
         _AttackArgs.eval_dataset = args.eval_dataset
         attacker = Attacker(_AttackArgs(), model=model, c_model=c_model, tokenizer=tokenizer, get_emb=get_emb)
 
-        target_queries = [None] * len(target_queries_idx)
-        for iter_idx, i in enumerate(target_queries_idx):
+        # Attacker.get_attack() must see the *full* candidate pool (every
+        # query_id used to build the held-out dataset), not just the
+        # queries we're about to score/report on below -- see
+        # resolve_query_id_pools()'s docstring for why a narrower pool
+        # would silently change retrieved-passage composition.
+        target_queries = [None] * len(pool_idx)
+        for iter_idx, i in enumerate(pool_idx):
             top1_idx = list(results[incorrect_answers[i]["id"]].keys())[0]
             top1_score = results[incorrect_answers[i]["id"]][top1_idx]
             target_queries[iter_idx] = {
@@ -231,8 +313,9 @@ def run_evaluation(args) -> Dict:
         with torch.no_grad():
             adv_embs = get_emb(c_model, adv_input)
 
+        # ...but only the held-out subset is actually scored/reported on.
         max_k = max(args.k_values)
-        for iter_idx, i in enumerate(target_queries_idx):
+        for i in eval_idx:
             qid = incorrect_answers[i]["id"]
             question = incorrect_answers[i]["question"]
 

@@ -43,7 +43,7 @@ import json
 import os
 import sys
 import time
-from typing import Dict, List
+from typing import Dict, List, Tuple
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO_ROOT not in sys.path:
@@ -108,11 +108,32 @@ def parse_args():
     return parser.parse_args()
 
 
-def build_feature_rows(args) -> List[Dict]:
+def build_feature_rows(args) -> Tuple[List[Dict], List[str]]:
     """Reproduce main.py's retrieval + injection pipeline for the first
     `--max_queries` target queries, for every `(attack_method, k)` combo,
     and compute the full ML-FilterRAG feature dict for every retrieved
-    passage. Returns a flat list of per-passage dicts."""
+    passage. Returns `(rows, target_query_ids)`: a flat list of per-passage
+    dicts, and the *exact* ordered list of `query_id`s used to build the
+    shared adversarial candidate pool (see below) -- callers must persist
+    this (see `write_config_json`) so `scripts/evaluate_ml_filterrag.py` can
+    later reconstruct the identical pool for a genuinely held-out
+    evaluation; see docs/ML_FILTERRAG_IMPLEMENTATION_PLAN.md and the
+    `--held_out_config` handling in that script for why this matters.
+
+    Important, easy-to-miss detail shared with `main.py`: for a given
+    `attack_method`, `Attacker.get_attack(target_queries)` is called *once*
+    with *every* target query in this pool, and every one of the resulting
+    adversarial texts (`adv_text_list`, flattened across all pool queries)
+    is then scored against *every* individual query's embedding when
+    building that query's `merged_results` -- i.e. a query's retrieved
+    top-k can legitimately include another pool query's adversarial text,
+    not just its own. This means the retrieved-passage composition for one
+    query_id depends on which *other* query_ids share its pool -- a
+    held-out evaluator that only pools the held-out subset (a strictly
+    smaller pool) will *not* reproduce the same top-k composition, hence
+    `target_query_ids` (the full pool, not just `train_query_ids ∪
+    test_query_ids` recomputed independently) must be persisted verbatim.
+    """
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"[ml_filterrag_dataset] retrieval device: {device}")
 
@@ -260,7 +281,7 @@ def build_feature_rows(args) -> List[Dict]:
     written_test_ids = {r["query_id"] for r in all_rows if r["split"] == "test"}
     assert_no_query_id_leakage(written_train_ids, written_test_ids)
 
-    return all_rows
+    return all_rows, query_ids
 
 
 def write_dataset_csv(rows: List[Dict], path: str) -> None:
@@ -273,11 +294,21 @@ def write_dataset_csv(rows: List[Dict], path: str) -> None:
     print(f"Wrote {len(rows)} feature row(s) to {path}")
 
 
-def write_config_json(args, rows: List[Dict], path: str) -> None:
+def write_config_json(args, rows: List[Dict], target_query_ids: List[str], path: str) -> None:
     """Provenance record: exact feature-extractor config (matching mode,
     semantic threshold, SLM/LM model names, split seed) used to build this
     dataset -- so downstream scripts/humans can verify/re-derive the split
-    and reproduce the run."""
+    and reproduce the run.
+
+    `target_query_ids` is the *full* adversarial candidate pool -- every
+    query_id used to build this dataset, in the exact original order
+    (`build_feature_rows()`'s return value) -- and is what
+    `scripts/evaluate_ml_filterrag.py --held_out_config` reconstructs to
+    reproduce identical retrieved-passage composition for its held-out
+    `test_query_ids` subset (see `build_feature_rows()`'s docstring for
+    why order/completeness of this pool matters). `train_query_ids`/
+    `test_query_ids` are kept as before (sorted, derived from the written
+    rows) for backward compatibility with existing readers."""
     train_ids = sorted({r["query_id"] for r in rows if r["split"] == "train"})
     test_ids = sorted({r["query_id"] for r in rows if r["split"] == "test"})
     config = {
@@ -301,6 +332,7 @@ def write_config_json(args, rows: List[Dict], path: str) -> None:
         "n_rows": len(rows),
         "n_train_query_ids": len(train_ids),
         "n_test_query_ids": len(test_ids),
+        "target_query_ids": list(target_query_ids),
         "train_query_ids": train_ids,
         "test_query_ids": test_ids,
         "no_gpt_api_calls_made": True,
@@ -318,11 +350,11 @@ def main():
     print("[ml_filterrag_dataset] No GPT/API call will be made; no llm.query() call will be made.")
 
     t0 = time.perf_counter()
-    rows = build_feature_rows(args)
+    rows, target_query_ids = build_feature_rows(args)
     print(f"[ml_filterrag_dataset] total build time: {time.perf_counter() - t0:.1f}s for {len(rows)} row(s)")
 
     write_dataset_csv(rows, os.path.join(args.out_dir, "features.csv"))
-    write_config_json(args, rows, os.path.join(args.out_dir, "dataset_config.json"))
+    write_config_json(args, rows, target_query_ids, os.path.join(args.out_dir, "dataset_config.json"))
 
 
 if __name__ == "__main__":
