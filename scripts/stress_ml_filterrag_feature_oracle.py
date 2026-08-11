@@ -82,6 +82,13 @@ ALL_STRATEGIES: Tuple[str, ...] = (
 
 DEFAULT_RECALL_BREAK_THRESHOLDS: Tuple[float, ...] = (0.90, 0.80, 0.50)
 
+# The single "headline operating point" alpha the consolidated
+# FEATURE_ORACLE_THRESHOLD_SUMMARY.csv reports poison_recall/
+# residual_poison_fraction/mean_poison_l2_displacement at, alongside the
+# baseline (alpha=1.0) and first-break-alpha columns -- see
+# `build_threshold_summary_rows()`.
+DEFAULT_HEADLINE_ALPHA = 0.4
+
 # nearest_clean_bijection: groups (poison_local, clean_pool) with both sides
 # no larger than this are solved by brute-force itertools.permutations (an
 # exact minimum-total-distance bijection when sizes are equal), mirroring
@@ -113,6 +120,35 @@ def load_features_dataframe(path: str):
     if df["is_poison"].dtype != bool:
         df["is_poison"] = df["is_poison"].astype(str).str.strip().str.lower().map({"true": True, "false": False})
     return df
+
+
+def apply_split_filter(df, split_filter: str) -> Tuple["object", Optional[Dict]]:
+    """Returns `(filtered_df, split_counts)`. `split_counts` is the raw
+    `df['split'].value_counts()` dict (computed *before* filtering) if a
+    `split` column exists, else `None`.
+
+    `split_filter='all'` never filters (and never requires a `split`
+    column). `split_filter` in `{'train', 'test'}` restricts to rows with
+    that exact `split` value; if `--features_csv` has no `split` column at
+    all, this raises a clear `ValueError` immediately -- never silently
+    falls back to evaluating every row as if it were held-out."""
+    if "split" not in df.columns:
+        if split_filter != "all":
+            raise ValueError(
+                f"--split_filter={split_filter!r} was given, but --features_csv has no 'split' "
+                "column -- cannot restrict to a train/test subset that doesn't exist. Either "
+                "rebuild the feature CSV with scripts/build_ml_filterrag_dataset.py (which always "
+                "writes a 'split' column), or pass --split_filter all."
+            )
+        return df, None
+
+    split_counts = df["split"].value_counts().to_dict()
+    if split_filter == "all":
+        return df, split_counts
+
+    filtered = df[df["split"] == split_filter].reset_index(drop=True)
+    print(f"[stress_ml_filterrag_feature_oracle] restricted to split=={split_filter!r}: {len(filtered)} row(s)")
+    return filtered, split_counts
 
 
 def resolve_feature_names(classifier: MLFilterRAGClassifier, override: Optional[Sequence[str]] = None) -> Tuple[str, ...]:
@@ -519,51 +555,191 @@ def first_break_alphas(
 # Sweep orchestration
 # ---------------------------------------------------------------------------
 
-def run_sweep(
-    df, classifier: MLFilterRAGClassifier, feature_names: Sequence[str], *, threshold: float,
+def run_multi_threshold_sweep(
+    df, classifier: MLFilterRAGClassifier, feature_names: Sequence[str], *, thresholds: Sequence[float],
     alphas: Sequence[float] = DEFAULT_ALPHA_SWEEP, strategies: Sequence[str] = ALL_STRATEGIES,
     seed: int = 12, recall_break_thresholds: Sequence[float] = DEFAULT_RECALL_BREAK_THRESHOLDS,
-) -> Tuple[List[Dict], Dict[str, Dict]]:
-    """Runs every `(strategy, alpha)` combination; returns
-    `(sweep_rows, strategy_meta)`:
-    - `sweep_rows`: one dict per `(strategy, alpha)`, ready to write as a
-      CSV row (includes `first_break_alpha__{threshold}` columns, computed
-      once per strategy after that strategy's full alpha sweep).
-    - `strategy_meta`: per-strategy target-construction bookkeeping (from
-      `build_targets()`), for `run_config.json`/the report's provenance.
+) -> Tuple[List[Dict], Dict[str, Dict], Dict[float, Dict[str, Dict]]]:
+    """Runs every `(strategy, threshold, alpha)` combination **without
+    retraining the classifier**: target vectors (`build_targets()`) and
+    `classifier.predict_proba()` are each computed exactly once per
+    `(strategy, alpha)` -- the same already-loaded artifact, never
+    re-fit -- and reused across every `threshold` in `thresholds` (only the
+    `proba >= threshold` comparison, and everything downstream of it, is
+    redone per threshold).
+
+    Returns `(sweep_rows, strategy_target_meta, threshold_strategy_meta)`:
+    - `sweep_rows`: one dict per `(strategy, threshold, alpha)`, ready to
+      write as a CSV row (includes `first_break_alpha__{threshold}` columns
+      for every `t` in `recall_break_thresholds`, computed per
+      `(strategy, threshold)` after that combination's full alpha sweep).
+    - `strategy_target_meta`: per-strategy target-construction bookkeeping
+      (from `build_targets()`) -- threshold-independent (targets never
+      depend on the classification threshold).
+    - `threshold_strategy_meta[threshold][strategy]`: `{"first_break_alphas":
+      {...}}` for that specific `(threshold, strategy)` combination.
     """
     X = feature_matrix(df, feature_names)
     is_poison = df["is_poison"].to_numpy(dtype=bool)
 
     sweep_rows: List[Dict] = []
-    strategy_meta: Dict[str, Dict] = {}
+    strategy_target_meta: Dict[str, Dict] = {}
+    threshold_strategy_meta: Dict[float, Dict[str, Dict]] = {t: {} for t in thresholds}
 
     for strategy in strategies:
         targets, meta = build_targets(strategy, df, X, feature_names, seed=seed)
-        strategy_meta[strategy] = meta
+        strategy_target_meta[strategy] = meta
 
-        alpha_to_recall: Dict[float, Optional[float]] = {}
-        per_alpha_rows: List[Dict] = []
+        # Computed exactly once per alpha for this strategy -- classifier
+        # is never re-fit, and predict_proba() is never re-called per
+        # threshold below (only the >= threshold comparison is redone).
+        modified_by_alpha: Dict[float, "object"] = {}
+        proba_by_alpha: Dict[float, "object"] = {}
         for alpha in alphas:
             X_modified = interpolate_poison_features(X, targets, is_poison, alpha)
-            pred, proba = classify(classifier, X_modified, threshold)
-            metrics = compute_alpha_metrics(
-                X_original=X, X_modified=X_modified, is_poison=is_poison,
-                pred=pred, feature_names=feature_names,
-            )
-            alpha_to_recall[alpha] = metrics["poison_recall"]
-            row = {"strategy": strategy, "alpha": alpha}
-            row.update(metrics)
-            per_alpha_rows.append(row)
+            modified_by_alpha[alpha] = X_modified
+            proba_by_alpha[alpha] = classifier.predict_proba(X_modified)
 
-        breaks = first_break_alphas(alpha_to_recall, recall_break_thresholds)
-        for row in per_alpha_rows:
-            for t in recall_break_thresholds:
-                row[f"first_break_alpha__{t}"] = breaks[t]
-        strategy_meta[strategy]["first_break_alphas"] = {str(t): breaks[t] for t in recall_break_thresholds}
-        sweep_rows.extend(per_alpha_rows)
+        for threshold in thresholds:
+            alpha_to_recall: Dict[float, Optional[float]] = {}
+            per_alpha_rows: List[Dict] = []
+            for alpha in alphas:
+                pred = (proba_by_alpha[alpha] >= threshold).astype(int)
+                metrics = compute_alpha_metrics(
+                    X_original=X, X_modified=modified_by_alpha[alpha], is_poison=is_poison,
+                    pred=pred, feature_names=feature_names,
+                )
+                alpha_to_recall[alpha] = metrics["poison_recall"]
+                row = {"strategy": strategy, "threshold": threshold, "alpha": alpha}
+                row.update(metrics)
+                per_alpha_rows.append(row)
 
+            breaks = first_break_alphas(alpha_to_recall, recall_break_thresholds)
+            for row in per_alpha_rows:
+                for t in recall_break_thresholds:
+                    row[f"first_break_alpha__{t}"] = breaks[t]
+            threshold_strategy_meta[threshold][strategy] = {
+                "first_break_alphas": {str(t): breaks[t] for t in recall_break_thresholds},
+            }
+            sweep_rows.extend(per_alpha_rows)
+
+    return sweep_rows, strategy_target_meta, threshold_strategy_meta
+
+
+def run_sweep(
+    df, classifier: MLFilterRAGClassifier, feature_names: Sequence[str], *, threshold: float,
+    alphas: Sequence[float] = DEFAULT_ALPHA_SWEEP, strategies: Sequence[str] = ALL_STRATEGIES,
+    seed: int = 12, recall_break_thresholds: Sequence[float] = DEFAULT_RECALL_BREAK_THRESHOLDS,
+) -> Tuple[List[Dict], Dict[str, Dict]]:
+    """Single-threshold convenience wrapper around
+    `run_multi_threshold_sweep()` (kept for backward compatibility/simple
+    callers): returns `(sweep_rows, strategy_meta)`, where `sweep_rows`
+    has no `'threshold'` key (there is only one) and `strategy_meta[strategy]`
+    merges that strategy's target-construction meta with its
+    `first_break_alphas` for this one `threshold` -- exactly the shape this
+    function returned before multi-threshold support was added.
+    """
+    sweep_rows, strategy_target_meta, threshold_strategy_meta = run_multi_threshold_sweep(
+        df, classifier, feature_names, thresholds=[threshold], alphas=alphas, strategies=strategies,
+        seed=seed, recall_break_thresholds=recall_break_thresholds,
+    )
+    for row in sweep_rows:
+        row.pop("threshold", None)
+    strategy_meta: Dict[str, Dict] = {}
+    for strategy in strategies:
+        merged = dict(strategy_target_meta[strategy])
+        merged["first_break_alphas"] = threshold_strategy_meta[threshold][strategy]["first_break_alphas"]
+        strategy_meta[strategy] = merged
     return sweep_rows, strategy_meta
+
+
+# ---------------------------------------------------------------------------
+# Threshold summary (consolidated, paper-ready)
+# ---------------------------------------------------------------------------
+
+def _nearest_alpha(alphas: Sequence[float], target: float) -> float:
+    """The value in `alphas` closest to `target`; ties broken toward the
+    *higher* alpha (a smaller/more conservative feature-space nudge).
+    Used so `--alphas` can be customized away from the default sweep
+    without `build_threshold_summary_rows()` crashing if `target` (e.g.
+    `DEFAULT_HEADLINE_ALPHA=0.4`) isn't exactly present."""
+    return min(alphas, key=lambda a: (abs(a - target), -a))
+
+
+def _find_sweep_row(sweep_rows: List[Dict], *, strategy: str, threshold: float, alpha: float) -> Optional[Dict]:
+    for row in sweep_rows:
+        if row["strategy"] == strategy and row["threshold"] == threshold and row["alpha"] == alpha:
+            return row
+    return None
+
+
+def build_threshold_summary_rows(
+    *, strategies: Sequence[str], thresholds: Sequence[float], alphas: Sequence[float],
+    sweep_rows: List[Dict], headline_alpha: float = DEFAULT_HEADLINE_ALPHA,
+) -> List[Dict]:
+    """One consolidated row per `(threshold, strategy)` -- the "paper-ready"
+    summary: baseline (alpha=1.0, or the highest available alpha)
+    poison_recall, the three fixed first-break alphas (0.90/0.80/0.50 --
+    recomputed directly from `sweep_rows` here, independent of whatever
+    `--recall_break_thresholds` the main sweep used, so this summary's
+    column set never changes shape), and the headline-operating-point
+    (`headline_alpha`, default `0.4`) poison_recall/clean_fpr/
+    residual_poison_fraction/mean_poison_l2_displacement snapshot.
+    """
+    baseline_alpha = 1.0 if 1.0 in alphas else max(alphas)
+    resolved_headline_alpha = headline_alpha if headline_alpha in alphas else _nearest_alpha(alphas, headline_alpha)
+    if resolved_headline_alpha != headline_alpha:
+        print(
+            f"[stress_ml_filterrag_feature_oracle] WARNING: headline_alpha={headline_alpha} not in "
+            f"--alphas; using the nearest available alpha={resolved_headline_alpha} for the "
+            "'_at_headline_alpha' summary columns instead."
+        )
+
+    rows: List[Dict] = []
+    for threshold in thresholds:
+        for strategy in strategies:
+            baseline_row = _find_sweep_row(sweep_rows, strategy=strategy, threshold=threshold, alpha=baseline_alpha)
+            headline_row = _find_sweep_row(sweep_rows, strategy=strategy, threshold=threshold, alpha=resolved_headline_alpha)
+            alpha_to_recall = {
+                row["alpha"]: row["poison_recall"] for row in sweep_rows
+                if row["strategy"] == strategy and row["threshold"] == threshold
+            }
+            breaks = {
+                str(t): v for t, v in first_break_alphas(alpha_to_recall, (0.90, 0.80, 0.50)).items()
+            }
+            rows.append({
+                "threshold": threshold,
+                "strategy": strategy,
+                "baseline_alpha_used": baseline_alpha,
+                "baseline_poison_recall_at_alpha__1.0": baseline_row["poison_recall"] if baseline_row else None,
+                "first_break_alpha__0.9": breaks.get("0.9"),
+                "first_break_alpha__0.8": breaks.get("0.8"),
+                "first_break_alpha__0.5": breaks.get("0.5"),
+                "headline_alpha_used": resolved_headline_alpha,
+                "poison_recall_at_alpha__0.4": headline_row["poison_recall"] if headline_row else None,
+                "clean_false_positive_rate": baseline_row["clean_false_positive_rate"] if baseline_row else None,
+                "residual_poison_fraction_at_alpha__0.4": headline_row["residual_poison_fraction"] if headline_row else None,
+                "mean_poison_l2_displacement_at_alpha__0.4": headline_row["mean_poison_l2_displacement"] if headline_row else None,
+            })
+    return rows
+
+
+def write_threshold_summary_csv(rows: List[Dict], path: str) -> None:
+    import csv
+
+    fieldnames = [
+        "threshold", "strategy", "baseline_alpha_used", "baseline_poison_recall_at_alpha__1.0",
+        "first_break_alpha__0.9", "first_break_alpha__0.8", "first_break_alpha__0.5",
+        "headline_alpha_used", "poison_recall_at_alpha__0.4", "clean_false_positive_rate",
+        "residual_poison_fraction_at_alpha__0.4", "mean_poison_l2_displacement_at_alpha__0.4",
+    ]
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({k: row.get(k) for k in fieldnames})
+    print(f"Wrote {len(rows)} threshold-summary row(s) to {path}")
 
 
 # ---------------------------------------------------------------------------
@@ -573,8 +749,9 @@ def run_sweep(
 def write_sweep_csv(rows: List[Dict], path: str, feature_names: Sequence[str], recall_break_thresholds: Sequence[float]) -> None:
     import csv
 
-    fieldnames = [
-        "strategy", "alpha", "n_rows", "n_poison", "n_clean", "removed_poison", "removed_clean",
+    has_threshold_col = any("threshold" in row for row in rows)
+    fieldnames = ["strategy"] + (["threshold"] if has_threshold_col else []) + [
+        "alpha", "n_rows", "n_poison", "n_clean", "removed_poison", "removed_clean",
         "poison_recall", "clean_false_positive_rate", "residual_poison_count", "residual_clean_count",
         "residual_poison_fraction", "mean_poison_l2_displacement", "max_poison_l2_displacement",
     ] + [f"mean_abs_change__{name}" for name in feature_names] + [
@@ -631,14 +808,38 @@ def summarize_best_worst_strategy(strategy_meta: Dict[str, Dict], recall_break_t
     }
 
 
-def write_report_md(
-    path: str, *, model_path: str, features_csv: str, feature_names: Sequence[str], threshold: float,
-    n_rows: int, n_poison: int, n_clean: int, split_counts: Optional[Dict], alphas: Sequence[float],
-    strategies: Sequence[str], sweep_rows: List[Dict], strategy_meta: Dict[str, Dict],
-    recall_break_thresholds: Sequence[float],
-) -> None:
-    best_worst = summarize_best_worst_strategy(strategy_meta, recall_break_thresholds)
+def _split_filter_headline_statement(split_filter: str) -> str:
+    """The task's requirement #4 "headline results are held-out test split
+    only when --split_filter test is used" -- rendered as an explicit,
+    unambiguous report line, worded differently depending on what was
+    actually run (never a blanket claim of held-out status that isn't
+    true for this particular run)."""
+    if split_filter == "test":
+        return (
+            "**Headline results in this report ARE the held-out TEST split** "
+            "(`--split_filter test`) -- these query_ids were never used to train the "
+            "loaded classifier artifact (see that artifact's own `training_meta`)."
+        )
+    if split_filter == "train":
+        return (
+            "**WARNING: headline results in this report are the TRAIN split** "
+            "(`--split_filter train`), **NOT held-out** -- do not cite these as held-out "
+            "generalization numbers. Re-run with `--split_filter test` for paper-facing results."
+        )
+    return (
+        "**WARNING: headline results in this report combine TRAIN+TEST rows** "
+        "(`--split_filter all`) -- **NOT a held-out evaluation.** Re-run with "
+        "`--split_filter test` for paper-facing held-out numbers."
+    )
 
+
+def write_report_md(
+    path: str, *, model_path: str, features_csv: str, feature_names: Sequence[str], thresholds: Sequence[float],
+    n_rows: int, n_poison: int, n_clean: int, split_counts: Optional[Dict], split_filter: str,
+    alphas: Sequence[float], strategies: Sequence[str], sweep_rows: List[Dict],
+    strategy_target_meta: Dict[str, Dict], threshold_strategy_meta: Dict[float, Dict[str, Dict]],
+    summary_rows: List[Dict], recall_break_thresholds: Sequence[float], headline_alpha: float = DEFAULT_HEADLINE_ALPHA,
+) -> None:
     lines = [
         "# ML-FilterRAG-top-k Feature-Space Oracle Stress Test",
         "",
@@ -646,74 +847,114 @@ def write_report_md(
         "call, no retrieval rerun, no passage text read/generated/rewritten anywhere in this "
         "run -- see the Limitations section below.",
         "",
+        _split_filter_headline_statement(split_filter),
+        "",
         "## Inputs",
         "",
         f"- Model artifact: `{model_path}`",
         f"- Feature CSV: `{features_csv}`",
         f"- Feature names used (from the classifier artifact unless `--feature_names` was "
         f"passed explicitly): `{list(feature_names)}`",
-        f"- Classification threshold used: `{threshold}`",
-        f"- Rows: {n_rows} total ({n_poison} poison / {n_clean} clean)",
+        f"- Split filter: `--split_filter {split_filter}`",
+        f"- Classification threshold(s) used: `{list(thresholds)}`",
+        f"- Rows evaluated (after split filtering): {n_rows} total ({n_poison} poison / {n_clean} clean)",
     ]
     if split_counts is not None:
-        lines.append(
-            f"- `split` column present: {split_counts} (this sweep evaluates every row "
-            "regardless of split, unless `--split_filter` restricted it -- see run_config.json)"
-        )
+        lines.append(f"- `split` column value counts (before filtering): {split_counts}")
     else:
         lines.append("- No `split` column present in `--features_csv`; train/test status not applicable.")
     lines += [
         f"- Alpha sweep: `{list(alphas)}`",
         f"- Strategies: `{list(strategies)}`",
-        f"- Recall break thresholds checked: `{list(recall_break_thresholds)}`",
+        f"- Recall break thresholds checked (main sweep columns): `{list(recall_break_thresholds)}`",
+        f"- Headline operating-point alpha (threshold-summary table): `{headline_alpha}`",
         "",
         "## Method",
         "",
         "For every `(strategy, alpha)` pair, every `is_poison == True` row's feature vector is "
         "replaced by `z_prime = alpha * z_poison + (1 - alpha) * z_target` (clean rows are never "
-        "modified), the trained classifier re-predicts every row's label from `z_prime` at the "
-        "threshold above, and detection-quality metrics are recomputed from those fresh "
-        "predictions -- `poison_recall`/`clean_false_positive_rate`/`residual_poison_fraction` "
-        "use the exact same definitions as `defense/diagnostics.py::build_diagnostic_record()`.",
+        "modified); target-vector construction and `classifier.predict_proba()` are each computed "
+        "exactly once per `(strategy, alpha)` -- the classifier artifact is loaded once and never "
+        "retrained/re-fit. Every classification `threshold` above is then applied to those *same* "
+        "already-computed probabilities (`proba >= threshold`), and detection-quality metrics are "
+        "recomputed from those fresh predictions -- `poison_recall`/`clean_false_positive_rate`/"
+        "`residual_poison_fraction` use the exact same definitions as "
+        "`defense/diagnostics.py::build_diagnostic_record()`.",
         "",
-        "## Results by strategy and alpha",
+        "## Threshold summary (paper-ready headline table)",
         "",
-        "| strategy | alpha | poison_recall | clean_fpr | residual_poison_count | "
-        "residual_poison_fraction | mean_l2_disp | max_l2_disp |",
-        "|---|---|---|---|---|---|---|---|",
+        "| threshold | strategy | baseline_recall@1.0 | first_break<0.9 | first_break<0.8 | "
+        "first_break<0.5 | recall@0.4 | clean_fpr | resid_poison_frac@0.4 | mean_l2_disp@0.4 |",
+        "|---|---|---|---|---|---|---|---|---|---|",
     ]
-    for row in sweep_rows:
+    for row in summary_rows:
         lines.append(
-            f"| {row['strategy']} | {row['alpha']} | {_fmt(row['poison_recall'])} | "
-            f"{_fmt(row['clean_false_positive_rate'])} | {row['residual_poison_count']} | "
-            f"{_fmt(row['residual_poison_fraction'])} | {_fmt(row['mean_poison_l2_displacement'])} | "
-            f"{_fmt(row['max_poison_l2_displacement'])} |"
+            f"| {row['threshold']} | {row['strategy']} | {_fmt(row['baseline_poison_recall_at_alpha__1.0'])} | "
+            f"{_fmt(row['first_break_alpha__0.9'])} | {_fmt(row['first_break_alpha__0.8'])} | "
+            f"{_fmt(row['first_break_alpha__0.5'])} | {_fmt(row['poison_recall_at_alpha__0.4'])} | "
+            f"{_fmt(row['clean_false_positive_rate'])} | {_fmt(row['residual_poison_fraction_at_alpha__0.4'])} | "
+            f"{_fmt(row['mean_poison_l2_displacement_at_alpha__0.4'])} |"
         )
     lines.append("")
-
-    lines += ["## First-break alpha table", "", "| strategy | " + " | ".join(f"recall < {t}" for t in recall_break_thresholds) + " |",
-               "|---|" + "---|" * len(recall_break_thresholds)]
-    for strategy in strategies:
-        breaks = strategy_meta[strategy]["first_break_alphas"]
-        cells = [_fmt(breaks.get(str(t))) if breaks.get(str(t)) is not None else "never" for t in recall_break_thresholds]
-        lines.append(f"| {strategy} | " + " | ".join(cells) + " |")
+    lines.append(
+        "(`first_break<X` = first alpha, descending from 1.0, at which poison_recall drops below X; "
+        "`recall@0.4`/`resid_poison_frac@0.4`/`mean_l2_disp@0.4` snapshot the headline alpha above -- "
+        "see `FEATURE_ORACLE_THRESHOLD_SUMMARY.csv` for the same data in machine-readable form.)"
+    )
     lines.append("")
 
-    lines += [
-        "## Best/worst strategy summary",
-        "",
-        f"- Ranking criterion: {best_worst['ranking_criterion']}",
-        f"- Most effective evasion (worst for the defense): `{best_worst['best_for_attacker_strategy']}` "
-        f"(first breaks at alpha={_fmt(best_worst['best_for_attacker_first_break_alpha'])})",
-        f"- Least effective evasion (most robust defense): `{best_worst['worst_for_attacker_strategy']}` "
-        f"(first breaks at alpha={_fmt(best_worst['worst_for_attacker_first_break_alpha'])})",
-        "",
-        "| rank | strategy | first_break_alpha |",
-        "|---|---|---|",
-    ]
-    for i, entry in enumerate(best_worst["ranking"]):
-        lines.append(f"| {i + 1} | {entry['strategy']} | {_fmt(entry['first_break_alpha'])} |")
-    lines.append("")
+    lines += ["## Full results by threshold, strategy, and alpha", ""]
+    for threshold in thresholds:
+        lines += [
+            f"### threshold = {threshold}",
+            "",
+            "| strategy | alpha | poison_recall | clean_fpr | residual_poison_count | "
+            "residual_poison_fraction | mean_l2_disp | max_l2_disp |",
+            "|---|---|---|---|---|---|---|---|",
+        ]
+        for row in sweep_rows:
+            if row["threshold"] != threshold:
+                continue
+            lines.append(
+                f"| {row['strategy']} | {row['alpha']} | {_fmt(row['poison_recall'])} | "
+                f"{_fmt(row['clean_false_positive_rate'])} | {row['residual_poison_count']} | "
+                f"{_fmt(row['residual_poison_fraction'])} | {_fmt(row['mean_poison_l2_displacement'])} | "
+                f"{_fmt(row['max_poison_l2_displacement'])} |"
+            )
+        lines.append("")
+
+    lines += ["## First-break alpha table (per threshold)", ""]
+    for threshold in thresholds:
+        lines += [
+            f"### threshold = {threshold}",
+            "",
+            "| strategy | " + " | ".join(f"recall < {t}" for t in recall_break_thresholds) + " |",
+            "|---|" + "---|" * len(recall_break_thresholds),
+        ]
+        for strategy in strategies:
+            breaks = threshold_strategy_meta[threshold][strategy]["first_break_alphas"]
+            cells = [_fmt(breaks.get(str(t))) if breaks.get(str(t)) is not None else "never" for t in recall_break_thresholds]
+            lines.append(f"| {strategy} | " + " | ".join(cells) + " |")
+        lines.append("")
+
+    lines += ["## Best/worst strategy summary (per threshold)", ""]
+    for threshold in thresholds:
+        best_worst = summarize_best_worst_strategy(threshold_strategy_meta[threshold], recall_break_thresholds)
+        lines += [
+            f"### threshold = {threshold}",
+            "",
+            f"- Ranking criterion: {best_worst['ranking_criterion']}",
+            f"- Most effective evasion (worst for the defense): `{best_worst['best_for_attacker_strategy']}` "
+            f"(first breaks at alpha={_fmt(best_worst['best_for_attacker_first_break_alpha'])})",
+            f"- Least effective evasion (most robust defense): `{best_worst['worst_for_attacker_strategy']}` "
+            f"(first breaks at alpha={_fmt(best_worst['worst_for_attacker_first_break_alpha'])})",
+            "",
+            "| rank | strategy | first_break_alpha |",
+            "|---|---|---|",
+        ]
+        for i, entry in enumerate(best_worst["ranking"]):
+            lines.append(f"| {i + 1} | {entry['strategy']} | {_fmt(entry['first_break_alpha'])} |")
+        lines.append("")
 
     lines += [
         "## Limitations",
@@ -730,8 +971,10 @@ def write_report_md(
         "retrieves `top_k` directly (no oversized `top-s` candidate pool filtered down to "
         "`top-k`); see `docs/ML_FILTERRAG_IMPLEMENTATION_PLAN.md` sections 1, 9, 10. Every "
         "result above should be reported as \"ML-FilterRAG-top-k\", never bare \"ML-FilterRAG\".",
-        "- No GPT/API call was made. No `llm.query()` call was made. No retrieval was rerun. No "
-        "passage text was read, generated, or rewritten.",
+        "- **Detection-only, offline oracle.** No GPT/API call was made. No `llm.query()` call "
+        "was made. No retrieval was rerun. No passage text was read, generated, or rewritten -- "
+        "this script only classifies already-extracted feature *numbers*.",
+        f"- {_split_filter_headline_statement(split_filter)}",
         "",
     ]
 
@@ -754,7 +997,18 @@ def parse_args():
         help="Override feature_names; default: use the loaded classifier artifact's own "
              "feature_names (paper-aligned DEFAULT_FEATURE_NAMES for a paper-aligned artifact).",
     )
-    parser.add_argument("--threshold", type=float, default=None, help="Default: the artifact's own threshold_default.")
+    parser.add_argument(
+        "--threshold", type=float, default=None,
+        help="Legacy single-threshold override; ignored if --thresholds is also given. "
+             "Default: the artifact's own threshold_default.",
+    )
+    parser.add_argument(
+        "--thresholds", nargs="+", type=float, default=None,
+        help="One or more classification thresholds to sweep, e.g. '--thresholds 0.35 0.4 0.5' "
+             "-- reruns the same oracle sweep (same targets, same classifier.predict_proba() "
+             "output) at each threshold without retraining the classifier. Default: a single "
+             "threshold, --threshold if given else the artifact's own threshold_default.",
+    )
     parser.add_argument("--alphas", nargs="+", type=float, default=list(DEFAULT_ALPHA_SWEEP))
     parser.add_argument("--strategies", nargs="+", default=list(ALL_STRATEGIES), choices=list(ALL_STRATEGIES))
     parser.add_argument("--seed", type=int, default=12, help="Deterministic tie-break/reporting seed (see build_targets_nearest_clean_bijection docstring).")
@@ -762,9 +1016,11 @@ def parse_args():
         "--recall_break_thresholds", nargs="+", type=float, default=list(DEFAULT_RECALL_BREAK_THRESHOLDS),
     )
     parser.add_argument(
-        "--split_filter", default="all", choices=["all", "train", "test"],
-        help="Restrict the stress test to rows with this 'split' value, if a 'split' column "
-             "exists (default: 'all' rows, train+test combined).",
+        "--split_filter", default="test", choices=["all", "train", "test"],
+        help="Restrict the stress test to rows with this 'split' value (default: 'test' -- "
+             "genuinely held-out query_ids never used to train the loaded classifier artifact; "
+             "paper-facing results should use 'test'). Raises a clear error if 'train'/'test' is "
+             "requested but --features_csv has no 'split' column at all.",
     )
     parser.add_argument("--out_dir", default=DEFAULT_OUT_DIR)
     return parser.parse_args()
@@ -777,30 +1033,30 @@ def main():
 
     t0 = time.perf_counter()
     df = load_features_dataframe(args.features_csv)
-
-    split_counts = None
-    if "split" in df.columns:
-        split_counts = df["split"].value_counts().to_dict()
-        if args.split_filter != "all":
-            df = df[df["split"] == args.split_filter].reset_index(drop=True)
-            print(f"[stress_ml_filterrag_feature_oracle] restricted to split=={args.split_filter!r}: {len(df)} row(s)")
-    elif args.split_filter != "all":
-        raise ValueError("--split_filter was given, but --features_csv has no 'split' column.")
+    df, split_counts = apply_split_filter(df, args.split_filter)
 
     classifier = MLFilterRAGClassifier.load(args.model_path)
     feature_names = resolve_feature_names(classifier, args.feature_names)
-    threshold = classifier.threshold_default if args.threshold is None else args.threshold
+    if args.thresholds:
+        thresholds = list(args.thresholds)
+    else:
+        thresholds = [classifier.threshold_default if args.threshold is None else args.threshold]
 
     n_poison = int(df["is_poison"].sum())
     n_clean = int(len(df) - n_poison)
     print(
-        f"[stress_ml_filterrag_feature_oracle] {len(df)} row(s) ({n_poison} poison / {n_clean} clean); "
-        f"feature_names={list(feature_names)}; threshold={threshold}"
+        f"[stress_ml_filterrag_feature_oracle] {len(df)} row(s) ({n_poison} poison / {n_clean} clean) "
+        f"after --split_filter {args.split_filter!r}; feature_names={list(feature_names)}; "
+        f"thresholds={thresholds}"
     )
 
-    sweep_rows, strategy_meta = run_sweep(
-        df, classifier, feature_names, threshold=threshold, alphas=args.alphas, strategies=args.strategies,
+    sweep_rows, strategy_target_meta, threshold_strategy_meta = run_multi_threshold_sweep(
+        df, classifier, feature_names, thresholds=thresholds, alphas=args.alphas, strategies=args.strategies,
         seed=args.seed, recall_break_thresholds=args.recall_break_thresholds,
+    )
+    summary_rows = build_threshold_summary_rows(
+        strategies=args.strategies, thresholds=thresholds, alphas=args.alphas, sweep_rows=sweep_rows,
+        headline_alpha=DEFAULT_HEADLINE_ALPHA,
     )
     print(f"[stress_ml_filterrag_feature_oracle] sweep completed in {time.perf_counter() - t0:.1f}s")
 
@@ -808,21 +1064,26 @@ def main():
     write_sweep_csv(
         sweep_rows, os.path.join(args.out_dir, "FEATURE_ORACLE_SWEEP.csv"), feature_names, args.recall_break_thresholds,
     )
+    write_threshold_summary_csv(summary_rows, os.path.join(args.out_dir, "FEATURE_ORACLE_THRESHOLD_SUMMARY.csv"))
     write_report_md(
         os.path.join(args.out_dir, "FEATURE_ORACLE_REPORT.md"),
         model_path=args.model_path, features_csv=args.features_csv, feature_names=feature_names,
-        threshold=threshold, n_rows=len(df), n_poison=n_poison, n_clean=n_clean, split_counts=split_counts,
-        alphas=args.alphas, strategies=args.strategies, sweep_rows=sweep_rows, strategy_meta=strategy_meta,
-        recall_break_thresholds=args.recall_break_thresholds,
+        thresholds=thresholds, n_rows=len(df), n_poison=n_poison, n_clean=n_clean, split_counts=split_counts,
+        split_filter=args.split_filter, alphas=args.alphas, strategies=args.strategies, sweep_rows=sweep_rows,
+        strategy_target_meta=strategy_target_meta, threshold_strategy_meta=threshold_strategy_meta,
+        summary_rows=summary_rows, recall_break_thresholds=args.recall_break_thresholds,
+        headline_alpha=DEFAULT_HEADLINE_ALPHA,
     )
     write_run_config(
         os.path.join(args.out_dir, "run_config.json"),
         features_csv=os.path.abspath(args.features_csv), model_path=os.path.abspath(args.model_path),
-        feature_names=list(feature_names), threshold=threshold, alphas=list(args.alphas),
+        feature_names=list(feature_names), thresholds=thresholds, alphas=list(args.alphas),
         strategies=list(args.strategies), seed=args.seed, recall_break_thresholds=list(args.recall_break_thresholds),
-        split_filter=args.split_filter, n_rows=len(df), n_poison=n_poison, n_clean=n_clean,
-        split_counts=split_counts, strategy_meta=strategy_meta,
+        headline_alpha=DEFAULT_HEADLINE_ALPHA, split_filter=args.split_filter, n_rows=len(df),
+        n_poison=n_poison, n_clean=n_clean, split_counts=split_counts,
+        strategy_target_meta=strategy_target_meta, threshold_strategy_meta=threshold_strategy_meta,
         no_gpt_api_calls_made=True, no_live_generation_through_llm_query=True, retrieval_rerun=False,
+        classifier_retrained=False,
         status="ML-FilterRAG-top-k feature-space oracle stress test (not a text-realizable attack; "
                "see FEATURE_ORACLE_REPORT.md Limitations)",
     )

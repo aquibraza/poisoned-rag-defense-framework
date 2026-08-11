@@ -367,48 +367,277 @@ class TestRunSweepEndToEnd(unittest.TestCase):
 
 
 class TestOutputFilesWritten(unittest.TestCase):
-    def test_csv_report_and_config_are_written(self):
+    def _fixture(self):
         df = make_df([
             poison_row(freq=0.9, k=5, query_id="q1"),
             clean_row(freq=0.1, k=5, query_id="q2"),
         ])
         clf = FakeClassifier()
-        alphas = (1.0, 0.5, 0.0)
+        alphas = (1.0, 0.5, 0.4, 0.0)
         strategies = (oracle.CLEAN_CENTROID, oracle.SAME_K_CLEAN_CENTROID)
-        rows, strategy_meta = oracle.run_sweep(
-            df, clf, FEATURE_NAMES, threshold=0.5, alphas=alphas, strategies=strategies,
+        thresholds = (0.4, 0.5)
+        return df, clf, alphas, strategies, thresholds
+
+    def test_csv_summary_report_and_config_are_written(self):
+        df, clf, alphas, strategies, thresholds = self._fixture()
+        sweep_rows, strategy_target_meta, threshold_strategy_meta = oracle.run_multi_threshold_sweep(
+            df, clf, FEATURE_NAMES, thresholds=thresholds, alphas=alphas, strategies=strategies,
+        )
+        summary_rows = oracle.build_threshold_summary_rows(
+            strategies=strategies, thresholds=thresholds, alphas=alphas, sweep_rows=sweep_rows,
         )
         with tempfile.TemporaryDirectory() as tmp:
             csv_path = os.path.join(tmp, "FEATURE_ORACLE_SWEEP.csv")
+            summary_csv_path = os.path.join(tmp, "FEATURE_ORACLE_THRESHOLD_SUMMARY.csv")
             report_path = os.path.join(tmp, "FEATURE_ORACLE_REPORT.md")
             config_path = os.path.join(tmp, "run_config.json")
 
-            oracle.write_sweep_csv(rows, csv_path, FEATURE_NAMES, oracle.DEFAULT_RECALL_BREAK_THRESHOLDS)
+            oracle.write_sweep_csv(sweep_rows, csv_path, FEATURE_NAMES, oracle.DEFAULT_RECALL_BREAK_THRESHOLDS)
+            oracle.write_threshold_summary_csv(summary_rows, summary_csv_path)
             oracle.write_report_md(
                 report_path, model_path="FAKE_MODEL.joblib", features_csv="FAKE_FEATURES.csv",
-                feature_names=FEATURE_NAMES, threshold=0.5, n_rows=len(df),
+                feature_names=FEATURE_NAMES, thresholds=thresholds, n_rows=len(df),
                 n_poison=int(df["is_poison"].sum()), n_clean=int((~df["is_poison"]).sum()),
-                split_counts=None, alphas=alphas, strategies=strategies, sweep_rows=rows,
-                strategy_meta=strategy_meta, recall_break_thresholds=oracle.DEFAULT_RECALL_BREAK_THRESHOLDS,
+                split_counts=None, split_filter="test", alphas=alphas, strategies=strategies,
+                sweep_rows=sweep_rows, strategy_target_meta=strategy_target_meta,
+                threshold_strategy_meta=threshold_strategy_meta, summary_rows=summary_rows,
+                recall_break_thresholds=oracle.DEFAULT_RECALL_BREAK_THRESHOLDS,
             )
             oracle.write_run_config(config_path, model_path="FAKE_MODEL.joblib", n_rows=len(df))
 
             self.assertTrue(os.path.exists(csv_path))
+            self.assertTrue(os.path.exists(summary_csv_path))
             self.assertTrue(os.path.exists(report_path))
             self.assertTrue(os.path.exists(config_path))
 
             written = pd.read_csv(csv_path)
-            self.assertEqual(len(written), len(alphas) * len(strategies))
+            self.assertEqual(len(written), len(alphas) * len(strategies) * len(thresholds))
+            self.assertIn("threshold", written.columns)
 
-            with open(report_path, encoding="utf-8") as f:
-                report_text = f.read()
-            self.assertIn("feature-space oracle", report_text.lower())
-            self.assertIn("not a text-realizable attack", report_text.lower())
-            self.assertIn("top-s Algorithm 2".lower(), report_text.lower())
+            written_summary = pd.read_csv(summary_csv_path)
+            self.assertEqual(len(written_summary), len(strategies) * len(thresholds))
 
             with open(config_path, encoding="utf-8") as f:
                 config = json.load(f)
             self.assertEqual(config["model_path"], "FAKE_MODEL.joblib")
+
+
+class TestReportLimitationsAndHeadlineStatement(unittest.TestCase):
+    """Requirement: the report must clearly state all four required
+    caveats, including the new split-filter-dependent headline statement."""
+
+    def _write_report(self, split_filter, tmp):
+        df = make_df([
+            poison_row(freq=0.9, k=5, query_id="q1"),
+            clean_row(freq=0.1, k=5, query_id="q2"),
+        ])
+        clf = FakeClassifier()
+        alphas = (1.0, 0.5, 0.4, 0.0)
+        strategies = (oracle.CLEAN_CENTROID,)
+        thresholds = (0.5,)
+        sweep_rows, strategy_target_meta, threshold_strategy_meta = oracle.run_multi_threshold_sweep(
+            df, clf, FEATURE_NAMES, thresholds=thresholds, alphas=alphas, strategies=strategies,
+        )
+        summary_rows = oracle.build_threshold_summary_rows(
+            strategies=strategies, thresholds=thresholds, alphas=alphas, sweep_rows=sweep_rows,
+        )
+        report_path = os.path.join(tmp, "FEATURE_ORACLE_REPORT.md")
+        oracle.write_report_md(
+            report_path, model_path="FAKE_MODEL.joblib", features_csv="FAKE_FEATURES.csv",
+            feature_names=FEATURE_NAMES, thresholds=thresholds, n_rows=len(df),
+            n_poison=int(df["is_poison"].sum()), n_clean=int((~df["is_poison"]).sum()),
+            split_counts=None, split_filter=split_filter, alphas=alphas, strategies=strategies,
+            sweep_rows=sweep_rows, strategy_target_meta=strategy_target_meta,
+            threshold_strategy_meta=threshold_strategy_meta, summary_rows=summary_rows,
+            recall_break_thresholds=oracle.DEFAULT_RECALL_BREAK_THRESHOLDS,
+        )
+        with open(report_path, encoding="utf-8") as f:
+            return f.read()
+
+    def test_report_includes_all_four_required_limitations(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            report_text = self._write_report("test", tmp).lower()
+        self.assertIn("feature-space oracle", report_text)
+        self.assertIn("not a text-realizable attack", report_text)
+        self.assertIn("detection-only", report_text)
+        self.assertIn("no gpt/api call was made", report_text)
+        self.assertIn("no `llm.query()` call".lower(), report_text)
+        self.assertIn("top-s algorithm 2", report_text)
+        self.assertIn("ml-filterrag-top-k", report_text)
+
+    def test_headline_statement_confirms_held_out_test_split(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            report_text = self._write_report("test", tmp)
+        self.assertIn("ARE the held-out TEST split", report_text)
+
+    def test_headline_statement_warns_for_train_split(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            report_text = self._write_report("train", tmp)
+        self.assertIn("NOT held-out", report_text)
+
+    def test_headline_statement_warns_for_all_split(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            report_text = self._write_report("all", tmp)
+        self.assertIn("NOT a held-out evaluation", report_text)
+
+
+class TestSplitFilter(unittest.TestCase):
+    def _df_with_split(self):
+        return make_df([
+            poison_row(freq=0.9, k=5, query_id="q1", split="train"),
+            poison_row(freq=0.8, matched=8.0, k=5, query_id="q2", split="test"),
+            clean_row(freq=0.1, k=5, query_id="q3", split="train"),
+            clean_row(freq=0.15, matched=1.5, k=5, query_id="q4", split="test"),
+        ])
+
+    def test_split_filter_test_restricts_to_test_rows_only(self):
+        df = self._df_with_split()
+        filtered, split_counts = oracle.apply_split_filter(df, "test")
+        self.assertEqual(len(filtered), 2)
+        self.assertTrue((filtered["split"] == "test").all())
+        self.assertEqual(split_counts, {"train": 2, "test": 2})
+
+    def test_split_filter_train_restricts_to_train_rows_only(self):
+        df = self._df_with_split()
+        filtered, split_counts = oracle.apply_split_filter(df, "train")
+        self.assertEqual(len(filtered), 2)
+        self.assertTrue((filtered["split"] == "train").all())
+
+    def test_split_filter_all_keeps_every_row(self):
+        df = self._df_with_split()
+        filtered, _ = oracle.apply_split_filter(df, "all")
+        self.assertEqual(len(filtered), len(df))
+
+    def test_missing_split_column_raises_clearly_for_test(self):
+        df = make_df([poison_row(freq=0.9, k=5, query_id="q1"), clean_row(freq=0.1, k=5, query_id="q2")])
+        self.assertNotIn("split", df.columns)
+        with self.assertRaises(ValueError) as ctx:
+            oracle.apply_split_filter(df, "test")
+        self.assertIn("split", str(ctx.exception))
+
+    def test_missing_split_column_raises_clearly_for_train(self):
+        df = make_df([poison_row(freq=0.9, k=5, query_id="q1"), clean_row(freq=0.1, k=5, query_id="q2")])
+        with self.assertRaises(ValueError):
+            oracle.apply_split_filter(df, "train")
+
+    def test_missing_split_column_does_not_raise_for_all(self):
+        df = make_df([poison_row(freq=0.9, k=5, query_id="q1"), clean_row(freq=0.1, k=5, query_id="q2")])
+        filtered, split_counts = oracle.apply_split_filter(df, "all")
+        self.assertEqual(len(filtered), len(df))
+        self.assertIsNone(split_counts)
+
+    def test_default_cli_split_filter_is_test(self):
+        import argparse
+        import sys as _sys
+
+        argv_backup = _sys.argv
+        try:
+            _sys.argv = ["stress_ml_filterrag_feature_oracle.py"]
+            args = oracle.parse_args()
+        finally:
+            _sys.argv = argv_backup
+        self.assertEqual(args.split_filter, "test")
+
+
+class TestMultipleThresholds(unittest.TestCase):
+    def _fixture(self):
+        df = make_df([
+            poison_row(freq=0.9, k=5, query_id="q1"),
+            poison_row(freq=0.42, matched=4.0, k=5, query_id="q2"),  # borderline: proba depends on interpolation
+            clean_row(freq=0.1, k=5, query_id="q3"),
+            clean_row(freq=0.15, matched=1.5, k=5, query_id="q4"),
+        ])
+        clf = FakeClassifier()  # poison-looking iff freq_density_score > 0.5
+        return df, clf
+
+    def test_multiple_thresholds_produce_one_summary_row_each_per_strategy(self):
+        df, clf = self._fixture()
+        thresholds = (0.35, 0.4, 0.5)
+        strategies = (oracle.CLEAN_CENTROID, oracle.SAME_K_CLEAN_CENTROID)
+        alphas = (1.0, 0.5, 0.4, 0.0)
+        sweep_rows, _, _ = oracle.run_multi_threshold_sweep(
+            df, clf, FEATURE_NAMES, thresholds=thresholds, alphas=alphas, strategies=strategies,
+        )
+        summary_rows = oracle.build_threshold_summary_rows(
+            strategies=strategies, thresholds=thresholds, alphas=alphas, sweep_rows=sweep_rows,
+        )
+        self.assertEqual(len(summary_rows), len(thresholds) * len(strategies))
+        seen = {(r["threshold"], r["strategy"]) for r in summary_rows}
+        self.assertEqual(len(seen), len(thresholds) * len(strategies))  # all distinct
+
+    def test_thresholds_produce_distinct_recall_values_when_probabilities_are_graded(self):
+        """A classifier whose proba is a graded function of freq_density_score
+        (not a hard 0/1) must show *different* poison_recall across
+        thresholds for at least one alpha -- proving the summary rows are
+        not just duplicates with a different 'threshold' label."""
+        df, _ = self._fixture()
+
+        def graded_proba(X):
+            return X[:, 0]  # proba == freq_density_score itself
+
+        clf = FakeClassifier(proba_fn=graded_proba)
+        thresholds = (0.3, 0.6)
+        alphas = (1.0,)
+        strategies = (oracle.CLEAN_CENTROID,)
+        sweep_rows, _, _ = oracle.run_multi_threshold_sweep(
+            df, clf, FEATURE_NAMES, thresholds=thresholds, alphas=alphas, strategies=strategies,
+        )
+        recall_low_thresh = next(r["poison_recall"] for r in sweep_rows if r["threshold"] == 0.3)
+        recall_high_thresh = next(r["poison_recall"] for r in sweep_rows if r["threshold"] == 0.6)
+        self.assertNotEqual(recall_low_thresh, recall_high_thresh)
+
+
+class TestThresholdAffectsPredictionsWithoutRetraining(unittest.TestCase):
+    def test_predict_proba_called_once_per_alpha_reused_across_thresholds(self):
+        df = make_df([
+            poison_row(freq=0.9, k=5, query_id="q1"),
+            clean_row(freq=0.1, k=5, query_id="q2"),
+        ])
+        call_log = []
+
+        class _SpyClassifier(FakeClassifier):
+            def predict_proba(self, X):
+                call_log.append(np.array(X, copy=True))
+                return super().predict_proba(X)
+
+        clf = _SpyClassifier()
+        self.assertFalse(hasattr(clf, "train"))  # never retrained: no train() method exists at all
+
+        alphas = (1.0, 0.5, 0.0)
+        thresholds = (0.3, 0.5, 0.7)
+        strategies = (oracle.CLEAN_CENTROID,)
+        sweep_rows, _, _ = oracle.run_multi_threshold_sweep(
+            df, clf, FEATURE_NAMES, thresholds=thresholds, alphas=alphas, strategies=strategies,
+        )
+        # predict_proba() called exactly once per alpha (not once per
+        # alpha-times-threshold) -- proves probabilities are computed once
+        # and simply re-thresholded, never recomputed/retrained per threshold.
+        self.assertEqual(len(call_log), len(alphas))
+
+    def test_predictions_and_recall_differ_across_thresholds_for_same_alpha(self):
+        df = make_df([
+            poison_row(freq=0.6, k=5, query_id="q1"),
+            poison_row(freq=0.9, matched=9.0, k=5, query_id="q2"),
+            clean_row(freq=0.1, k=5, query_id="q3"),
+        ])
+
+        def graded_proba(X):
+            return X[:, 0]
+
+        clf = FakeClassifier(proba_fn=graded_proba)
+        alphas = (1.0,)
+        thresholds = (0.2, 0.7, 0.95)
+        strategies = (oracle.CLEAN_CENTROID,)
+        sweep_rows, _, _ = oracle.run_multi_threshold_sweep(
+            df, clf, FEATURE_NAMES, thresholds=thresholds, alphas=alphas, strategies=strategies,
+        )
+        recalls = {r["threshold"]: r["poison_recall"] for r in sweep_rows}
+        # threshold=0.2: both poison rows (0.6, 0.9) detected -> recall=1.0
+        # threshold=0.7: only the 0.9 poison row detected -> recall=0.5
+        # threshold=0.95: neither poison row detected -> recall=0.0
+        self.assertAlmostEqual(recalls[0.2], 1.0)
+        self.assertAlmostEqual(recalls[0.7], 0.5)
+        self.assertAlmostEqual(recalls[0.95], 0.0)
 
 
 class TestResolveFeatureNames(unittest.TestCase):
