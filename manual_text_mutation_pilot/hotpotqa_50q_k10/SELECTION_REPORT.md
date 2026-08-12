@@ -120,8 +120,30 @@ Provenance is **not** taken from the evaluated `query_id` embedded in `doc_id` (
 
 - Primary queries: 4
 - Backup queries: 2
+- Total selected queries: 6
 - Poisoned passages exported: 30
 - Clean context passages exported: 27
+
+## GPT prompt packets (for later bundle generation)
+
+Prompt packets now cover **all 6** selected queries (4 primary + 2 backup), not primaries only.
+
+| File | Queries | Contents |
+|---|---:|---|
+| `gpt_prompt_packets.jsonl` | 6 | no-clean-context packet (poison passages only); includes `selection_role` |
+| `gpt_prompt_packets_no_clean_context.jsonl` | 6 | same as above; explicit condition filename for later no-clean bundle generation |
+| `gpt_prompt_packets_clean_context.jsonl` | 6 | clean-context-aware packet: same 5 poison passages **plus** the query's retrieved clean passages |
+
+Each packet has exactly 5 `poisoned_passages` (`poison_slot` 0–4). Backup packets use the same exported top-5 self-query poison slots already present in `mutation_input_passages.csv`.
+
+Packet query order matches `selected_queries.csv`:
+
+1. `5ae224da554299234fd043ee` (primary)
+2. `5aba749055429901930fa7d8` (primary)
+3. `5ae22b8d554299234fd0440f` (primary)
+4. `5a7759fc5542993569682d60` (primary)
+5. `5a8133725542995ce29dcbdb` (backup)
+6. `5a8e068b5542995085b37384` (backup)
 
 ## Process confirmation
 
