@@ -1,0 +1,4 @@
+family,intended_target_defense,ragdefender_mean_delta_removed_poison,ragdefender_weakened,filterrag_mean_delta_removed_poison,filterrag_weakened,ml_filterrag_mean_delta_removed_poison,ml_filterrag_weakened,any_cross_defense_failure,cross_defense_failure_defenses
+ragdefender_targeted,ragdefender,0.0,False,-0.16666666666666666,True,-0.6666666666666666,True,True,filterrag;ml_filterrag
+filterrag_targeted,filterrag,-0.3333333333333333,True,-1.1666666666666667,True,-2.1666666666666665,True,True,ragdefender;ml_filterrag
+mlfilterrag_targeted,ml_filterrag,0.16666666666666666,False,0.0,False,-0.16666666666666666,True,False,
