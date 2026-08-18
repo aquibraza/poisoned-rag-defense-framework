@@ -1,0 +1,13 @@
+defense_name,threshold,context_type,n_generations,n_strict_asr_success,n_clear_attack_success,n_ambiguous_or_prefix_false_positive,n_defense_success,n_no_answer_or_uncertain,n_other_failure_or_unclear,strict_asr_rate,clear_attack_success_rate
+filterrag_semantic,0.2,mutated,4,3,2,1,1,0,0,0.75,0.5
+ml_filterrag,0.35,mutated,5,4,3,1,0,1,0,0.8,0.6
+ml_filterrag,0.4,mutated,6,4,4,0,1,1,0,0.6666666666666666,0.6666666666666666
+ml_filterrag,0.5,mutated,6,4,3,1,2,0,0,0.6666666666666666,0.5
+none,,mutated,6,5,5,0,1,0,0,0.8333333333333334,0.8333333333333334
+ragdefender,,mutated,5,1,0,1,4,0,0,0.2,0.0
+filterrag_semantic,0.2,original,4,1,0,1,2,1,0,0.25,0.0
+ml_filterrag,0.35,original,2,0,0,0,1,0,1,0.0,0.0
+ml_filterrag,0.4,original,6,0,0,0,4,1,1,0.0,0.0
+ml_filterrag,0.5,original,3,0,0,0,2,0,1,0.0,0.0
+none,,original,3,3,3,0,0,0,0,1.0,1.0
+ragdefender,,original,5,0,0,0,4,1,0,0.0,0.0

@@ -6,7 +6,19 @@ diagnostics without touching `defense/defense_runner.py`:
 
 - `ragdefender` / `ragdefender_original` delegate to
   `defense_runner.apply_defense` completely unmodified -- the original
-  algorithm's behavior is preserved exactly.
+  algorithm's behavior is preserved exactly. These are the "ragdefender_legacy"
+  behavior (authors' released/artifact algorithm) and are pinned to it
+  permanently for backward compatibility -- no existing config or script
+  that passes `--defense ragdefender`/`ragdefender_original` is ever
+  silently affected by `ragdefender_paper`'s addition below.
+- `ragdefender_paper` delegates to `defense_runner.apply_defense(...,
+  ragdefender_version="paper")`: the FINAL ACSAC 2025 paper's Eq. 1-7
+  (self-excluded AND-logic Stage 1 for multi-hop, unchanged
+  already-paper-faithful clustering Stage 1 for single-hop, paper-faithful
+  Stage 2, Stella embedder by default). See
+  docs/RAGDEFENDER_FIDELITY_AUDIT_V2.md. New experiment configs should use
+  this, not `ragdefender`/`ragdefender_original`, for any claim intended to
+  represent the published RAGDefender algorithm.
 - `estimate_num_adversarial` reuses (via import, not edit)
   `defense_runner`'s private estimator functions so diagnostics and
   `random_remove_same_count` can learn RAGDefender's estimated adversarial
@@ -49,6 +61,7 @@ DEFENSE_CHOICES = (
     "none",
     "ragdefender",  # legacy alias, identical behavior to ragdefender_original
     "ragdefender_original",
+    "ragdefender_paper",  # FINAL ACSAC 2025 paper-faithful variant -- see module docstring
     "oracle_remove_all_poison",
     "random_remove_same_count",
     "filterrag",
@@ -70,6 +83,7 @@ def estimate_num_adversarial(
     *,
     device: str = "cuda",
     gpu_id: int = 0,
+    ragdefender_version: str = "legacy",
 ) -> int:
     """Reproduce RAGDefender's adversarial-count estimate (the first stage of
     `defense_runner.apply_defense`) without performing any removal.
@@ -80,15 +94,24 @@ def estimate_num_adversarial(
     RAGDefender itself is the active defense), and so
     `random_remove_same_count` can remove "the same number of passages as
     RAGDefender estimated."
+
+    `ragdefender_version` defaults to `"legacy"` (unchanged behavior for
+    every existing caller); pass `"paper"` to get the FINAL ACSAC 2025
+    paper-faithful multi-hop estimate instead (single-hop clustering is
+    reused unchanged either way -- see plan §0a item 1).
     """
     text_list = list(texts)
     if not text_list:
         return 0
-    cfg = defense_runner.DefenseConfig(device=device, gpu_id=gpu_id)
+    cfg = defense_runner.DefenseConfig(
+        device=device, gpu_id=gpu_id, ragdefender_version=ragdefender_version
+    )
     s_model = defense_runner._get_s_model(cfg)  # noqa: SLF001 -- intentional reuse
     mode = defense_runner._dataset_to_mode(dataset)  # noqa: SLF001
     if mode == "singlehop":
         return int(defense_runner._find_num_adversarial_agg(text_list, s_model))  # noqa: SLF001
+    if ragdefender_version == "paper":
+        return int(defense_runner._find_num_adversarial_paper(text_list, s_model))  # noqa: SLF001
     return int(defense_runner._find_num_adversarial(text_list, s_model))  # noqa: SLF001
 
 
@@ -142,6 +165,43 @@ def _run_ragdefender_original(
     diag_extra = {
         "N_adv_estimated_by_ragdefender": n_estimate,
         "notes": "",
+    }
+    return kept_passages, diag_extra
+
+
+def _run_ragdefender_paper(
+    query: str,
+    passages: Sequence[RetrievedPassage],
+    dataset: str,
+    *,
+    device: str,
+    gpu_id: int,
+    top_k: Optional[int],
+) -> Tuple[List[RetrievedPassage], Dict]:
+    """Call `defense_runner.apply_defense(ragdefender_version="paper")`: the
+    FINAL ACSAC 2025 paper-faithful RAGDefender variant (self-excluded
+    AND-logic Stage 1 for multi-hop, unchanged already-paper-faithful
+    clustering Stage 1 for single-hop, shared paper-faithful Stage 2, Stella
+    embedder by default). See docs/RAGDEFENDER_FIDELITY_AUDIT_V2.md.
+
+    Mirrors `_run_ragdefender_original` structurally (same
+    estimate-then-apply-then-remap pattern), so a diagnostic consumer can
+    treat both defenses uniformly."""
+    texts_list = [p.text for p in passages]
+
+    n_estimate = estimate_num_adversarial(
+        texts_list, dataset, device=device, gpu_id=gpu_id, ragdefender_version="paper"
+    )
+
+    kept_texts = defense_runner.apply_defense(
+        query, texts_list, dataset, device=device, gpu_id=gpu_id, top_k=top_k,
+        ragdefender_version="paper",
+    )
+    kept_passages = _match_kept_by_text_subsequence(passages, kept_texts)
+
+    diag_extra = {
+        "N_adv_estimated_by_ragdefender": n_estimate,
+        "notes": "ragdefender_version=paper",
     }
     return kept_passages, diag_extra
 
@@ -208,6 +268,11 @@ def run_defense(
 
     if name in ("ragdefender", "ragdefender_original"):
         return _run_ragdefender_original(
+            query, passages, dataset, device=device, gpu_id=gpu_id, top_k=top_k
+        )
+
+    if name == "ragdefender_paper":
+        return _run_ragdefender_paper(
             query, passages, dataset, device=device, gpu_id=gpu_id, top_k=top_k
         )
 
