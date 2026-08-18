@@ -748,6 +748,97 @@ class TestLegacyRegression(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# Gate-B follow-up STEP 1: paper-variant empty-safe-context behavior
+#
+# paper behavior: empty safe set remains empty
+# legacy behavior: historical restore-all fallback preserved
+# ---------------------------------------------------------------------------
+
+class TestPaperEmptySafeContext(unittest.TestCase):
+    """`ragdefender_paper` defines R_safe = R_tilde \\ R_adv with no
+    restore-all fallback if that difference is empty; `ragdefender_legacy`
+    keeps its historical `if not clean_docs: clean_docs = doc_list`
+    fallback, unchanged, for reproducibility of past runs. These tests
+    force Stage 2 to select every retrieved passage for removal (by
+    mocking the Stage-1 count estimator to return `len(doc_list)`, so
+    Stage 2's `ranked[:n_adv]` covers every index) and assert the two
+    variants diverge exactly as specified."""
+
+    def _fake_s_model(self):
+        import hashlib
+
+        import torch
+
+        class FakeSentenceTransformer:
+            def encode(self, text_list, convert_to_tensor=True):
+                vecs = []
+                for t in text_list:
+                    digest = hashlib.md5(t.encode("utf-8")).hexdigest()
+                    seed = int(digest[:8], 16)
+                    gen = torch.Generator().manual_seed(seed)
+                    vecs.append(torch.rand(16, generator=gen))
+                return torch.stack(vecs)
+
+        return FakeSentenceTransformer()
+
+    def test_a_and_b_paper_variant_returns_empty_when_stage2_removes_everything(self):
+        from unittest import mock
+
+        from defense import defense_runner
+
+        doc_list = ["passage zero text", "passage one text", "passage two text"]
+        with mock.patch.object(defense_runner, "_find_num_adversarial_paper", return_value=len(doc_list)):
+            result = defense_runner._apply_defense_paper(  # noqa: SLF001
+                doc_list, mode="multihop", s_model=self._fake_s_model(), top_k=None
+            )
+        self.assertEqual(result, [])
+
+    def test_c_legacy_variant_preserves_historical_restore_all_fallback(self):
+        from unittest import mock
+
+        from defense import defense_runner
+
+        doc_list = ["passage zero text", "passage one text", "passage two text"]
+        cfg = defense_runner.DefenseConfig(ragdefender_version="legacy", device="cpu")
+        with mock.patch.object(
+            defense_runner, "_get_s_model", return_value=self._fake_s_model()
+        ), mock.patch.object(
+            defense_runner, "_find_num_adversarial", return_value=len(doc_list)
+        ):
+            result = defense_runner.apply_defense(
+                "some query", list(doc_list), dataset="hotpotqa",
+                device=cfg.device, ragdefender_version="legacy",
+            )
+        # Legacy's historical fallback restores the full input list when
+        # Stage 2 would otherwise remove everything -- unchanged behavior.
+        self.assertEqual(result, doc_list)
+
+    def test_d_ordinary_nonempty_paper_case_is_unaffected(self):
+        """A normal case (Stage 1 flags fewer than all passages) must still
+        return a non-empty, strictly-reduced safe set, exactly as before
+        this fix -- the fix only changes the all-removed edge case."""
+        from defense import defense_runner
+
+        doc_list = [
+            "poison poison poison target keyword appears here now",
+            "poison poison target keyword appears again here too",
+            "completely unrelated fact about geography and history",
+            "another unrelated fact about science and nature today",
+        ]
+        result = defense_runner._apply_defense_paper(  # noqa: SLF001
+            doc_list, mode="multihop", s_model=self._fake_s_model(), top_k=None
+        )
+        # Deterministic given this fixed (hash-seeded) fake encoder: Stage 1
+        # flags 2/4 passages (both hand-crafted "poison"-keyword ones), and
+        # Stage 2 removes exactly those 2, leaving 2 -- i.e. a real partial
+        # removal, never all-or-nothing, so the new empty-safe-context
+        # behavior never triggers here.
+        self.assertEqual(len(result), 2)
+        self.assertNotEqual(result, [])
+        self.assertNotEqual(result, doc_list)
+
+
+# ---------------------------------------------------------------------------
 # 16. REAL HOTPOTQA FIXTURE (deferred until Gate B runs)
 # ---------------------------------------------------------------------------
 

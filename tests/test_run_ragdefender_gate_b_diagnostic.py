@@ -87,94 +87,134 @@ class TestGeometryStats(unittest.TestCase):
 
 
 class TestClassifyQuery(unittest.TestCase):
+    """`_classify_query` takes ONLY Stage-2 evidence (Gate-B follow-up
+    STEP 2 correction) -- it must not accept `is_poison`/`adv_flag` at all
+    any more. `TestClassifyQueryIgnoresStage1Flags` below separately pins
+    that no Stage-1-flag-shaped argument can influence it."""
+
     def test_zero_residual_success_label(self):
-        is_poison = np.array([True, True, False, False])
-        adv_flag = np.array([True, True, False, False])
         labels = gate_b._classify_query(
-            n_adv=2, is_poison=is_poison, adv_flag=adv_flag, top_pair_label="PP",
             removed_poison=2, removed_clean=0, residual_poison=0,
-            pp_count=1, pc_count=0, cc_count=0,
+            top_pair_label="PP", pp_count=1, pc_count=0, cc_count=0,
         )
         self.assertIn("zero-residual-poison success", labels)
         self.assertNotIn("residual-poison failure", labels)
         self.assertNotIn("clean over-removal", labels)
 
     def test_residual_poison_failure_label(self):
-        is_poison = np.array([True, True, False, False])
-        adv_flag = np.array([True, False, False, False])
         labels = gate_b._classify_query(
-            n_adv=1, is_poison=is_poison, adv_flag=adv_flag, top_pair_label="PP",
             removed_poison=1, removed_clean=0, residual_poison=1,
-            pp_count=0, pc_count=0, cc_count=0,
+            top_pair_label="PP", pp_count=0, pc_count=0, cc_count=0,
         )
         self.assertIn("residual-poison failure", labels)
 
     def test_clean_over_removal_label(self):
-        is_poison = np.array([True, True, False, False])
-        adv_flag = np.array([True, True, True, False])
         labels = gate_b._classify_query(
-            n_adv=3, is_poison=is_poison, adv_flag=adv_flag, top_pair_label="PP",
             removed_poison=2, removed_clean=1, residual_poison=0,
-            pp_count=1, pc_count=1, cc_count=0,
+            top_pair_label="PP", pp_count=1, pc_count=1, cc_count=0,
         )
         self.assertIn("clean over-removal", labels)
 
     def test_clean_density_label_from_cc_top_pair(self):
-        is_poison = np.array([True, True, False, False])
-        adv_flag = np.array([False, False, True, True])
         labels = gate_b._classify_query(
-            n_adv=2, is_poison=is_poison, adv_flag=adv_flag, top_pair_label="CC",
             removed_poison=0, removed_clean=2, residual_poison=2,
-            pp_count=0, pc_count=0, cc_count=1,
+            top_pair_label="CC", pp_count=0, pc_count=0, cc_count=1,
         )
         self.assertIn("clean-density / clean-top-pair failure", labels)
 
-    def test_clean_density_label_from_majority_clean_flagged(self):
-        is_poison = np.array([True, False, False, False])
-        adv_flag = np.array([False, True, True, False])
+    def test_clean_density_label_from_cc_plurality_of_selected_pairs(self):
+        # Top pair itself is PP, but CC pairs are the plurality of the
+        # selected Stage-2 pair set -- Stage-2 evidence, not a Stage-1-flag
+        # inference.
         labels = gate_b._classify_query(
-            n_adv=2, is_poison=is_poison, adv_flag=adv_flag, top_pair_label="PP",
             removed_poison=0, removed_clean=2, residual_poison=1,
-            pp_count=1, pc_count=0, cc_count=0,
+            top_pair_label="PP", pp_count=1, pc_count=0, cc_count=2,
         )
         self.assertIn("clean-density / clean-top-pair failure", labels)
+
+    def test_clean_density_label_from_removed_clean_exceeding_removed_poison(self):
+        # Top pair is PP and PP is not a CC plurality, but Stage 2 actually
+        # removed more clean than poison passages -- still Stage-2
+        # evidence (equivalent to "clean passages dominate the top N_adv
+        # frequency-score ranking," since removed_indices IS that ranking).
+        labels = gate_b._classify_query(
+            removed_poison=1, removed_clean=2, residual_poison=0,
+            top_pair_label="PP", pp_count=1, pc_count=1, cc_count=0,
+        )
+        self.assertIn("clean-density / clean-top-pair failure", labels)
+
+    def test_no_clean_density_label_when_stage2_evidence_is_all_pp(self):
+        # Pure-PP Stage-2 outcome (top pair PP, no CC pairs selected, zero
+        # clean removed) must NEVER be labeled clean-density, regardless
+        # of anything Stage 1 might have flagged.
+        labels = gate_b._classify_query(
+            removed_poison=4, removed_clean=0, residual_poison=1,
+            top_pair_label="PP", pp_count=6, pc_count=0, cc_count=0,
+        )
+        self.assertNotIn("clean-density / clean-top-pair failure", labels)
 
     def test_mixed_pair_failure_label(self):
         # residual_poison must be > 0 for "mixed-pair failure" to fire (a
         # mixed PP/PC/CC top-pair composition alone, with a clean outcome,
         # is not itself a "failure").
-        is_poison = np.array([True, True, True, False])
-        adv_flag = np.array([True, True, True, False])
         labels = gate_b._classify_query(
-            n_adv=3, is_poison=is_poison, adv_flag=adv_flag, top_pair_label="PP",
             removed_poison=2, removed_clean=0, residual_poison=1,
-            pp_count=1, pc_count=1, cc_count=0,
+            top_pair_label="PP", pp_count=1, pc_count=1, cc_count=0,
         )
         self.assertIn("mixed-pair failure", labels)
         self.assertIn("residual-poison failure", labels)
 
     def test_other_inspect_manually_when_no_pairs(self):
-        is_poison = np.array([True, False])
-        adv_flag = np.array([False, False])
         labels = gate_b._classify_query(
-            n_adv=0, is_poison=is_poison, adv_flag=adv_flag, top_pair_label=None,
             removed_poison=0, removed_clean=0, residual_poison=1,
-            pp_count=0, pc_count=0, cc_count=0,
+            top_pair_label=None, pp_count=0, pc_count=0, cc_count=0,
         )
         self.assertTrue(any("other / inspect manually" in label for label in labels))
 
     def test_labels_can_be_multiple(self):
         # A query can be both a residual-poison failure AND clean-density.
-        is_poison = np.array([True, False, False, False])
-        adv_flag = np.array([False, True, True, False])
         labels = gate_b._classify_query(
-            n_adv=2, is_poison=is_poison, adv_flag=adv_flag, top_pair_label="CC",
             removed_poison=0, removed_clean=2, residual_poison=1,
-            pp_count=0, pc_count=0, cc_count=1,
+            top_pair_label="CC", pp_count=0, pc_count=0, cc_count=1,
         )
         self.assertIn("residual-poison failure", labels)
         self.assertIn("clean over-removal", labels)
         self.assertIn("clean-density / clean-top-pair failure", labels)
+
+
+class TestClassifyQueryIgnoresStage1Flags(unittest.TestCase):
+    """Gate-B follow-up STEP 2's specific bug fix: `_classify_query` must
+    not accept, and therefore cannot be influenced by, Stage-1's
+    concentration AND-flags (`is_poison`/`adv_flag`, or any quantity
+    derived from them like "how many flagged passages are clean"). This
+    is the exact regression the taxonomy correction targets: the previous
+    implementation inferred "clean-density" whenever Stage-1-flagged
+    passages were majority-clean, even when Stage 2's actual removed set
+    was 100% poison (which is precisely the real Gate-B situation for
+    the `5a8cb288...` query -- Stage 1 may flag a majority-clean set to
+    determine the *count*, but Stage 2 still separately removed only
+    poison passages)."""
+
+    def test_signature_has_no_is_poison_or_adv_flag_parameter(self):
+        import inspect
+
+        sig = inspect.signature(gate_b._classify_query)
+        self.assertNotIn("is_poison", sig.parameters)
+        self.assertNotIn("adv_flag", sig.parameters)
+        self.assertNotIn("n_adv", sig.parameters)
+
+    def test_majority_clean_stage1_flags_with_all_poison_stage2_removal_is_not_clean_density(self):
+        # This reproduces the real Gate-B `5a8cb288...` shape at the
+        # Stage-2-evidence level: whatever Stage 1 flagged to produce the
+        # count, Stage 2 ended up selecting an all-PP pair set and
+        # removing zero clean passages -- must not be labeled
+        # clean-density under the corrected taxonomy.
+        labels = gate_b._classify_query(
+            removed_poison=4, removed_clean=0, residual_poison=1,
+            top_pair_label="PP", pp_count=6, pc_count=0, cc_count=0,
+        )
+        self.assertNotIn("clean-density / clean-top-pair failure", labels)
+        self.assertIn("residual-poison failure", labels)
 
 
 class TestGateAPairComposition(unittest.TestCase):

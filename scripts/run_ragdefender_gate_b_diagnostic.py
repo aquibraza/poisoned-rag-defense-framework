@@ -219,22 +219,43 @@ def _geometry_stats(matrix: np.ndarray, is_poison: np.ndarray) -> Dict:
 
 
 def _classify_query(
-    n_adv: int,
-    is_poison: np.ndarray,
-    adv_flag: np.ndarray,
-    top_pair_label: Optional[str],
     removed_poison: int,
     removed_clean: int,
     residual_poison: int,
+    top_pair_label: Optional[str],
     pp_count: int,
     pc_count: int,
     cc_count: int,
 ) -> List[str]:
-    """Descriptive, multi-label, from-scratch classification under
+    """Descriptive, multi-label, from-scratch mechanism classification under
     `ragdefender_paper` -- deliberately NOT forced into the old legacy
     taxonomy. Rules are heuristic and documented here (not a formal
     definition); borderline cases should still be inspected manually.
-    A query may receive more than one label."""
+    A query may receive more than one label.
+
+    IMPORTANT (Gate-B follow-up STEP 2 correction): this function takes
+    ONLY Stage-2 evidence (selected-pair PP/PC/CC composition, the actual
+    removed/residual counts) as input. It must NEVER be given the Stage-1
+    concentration AND-flags (`ConcentrationResultPaper.adv_flag`) or any
+    quantity derived from them (e.g. "how many Stage-1-flagged passages
+    are poison vs. clean"). Stage 1's flags are COUNT-ESTIMATION INDICATOR
+    FLAGS ONLY -- they determine N_adv (a single integer), not which
+    specific passages get removed; Stage 2 makes that decision
+    independently via its own frequency-score ranking over ALL k passages,
+    which can (and in this codebase's Gate-B run, does) select a different
+    index set than the one Stage 1 flagged. Treating Stage-1 flags as if
+    they were "the predicted adversarial subset" was the specific taxonomy
+    bug this correction removes; the previous implementation of this
+    function took `is_poison`/`adv_flag` and inferred a
+    "clean-density / clean-top-pair failure" label whenever more
+    Stage-1-flagged passages were clean than poison -- that inference path
+    has been deleted, not merely renamed. A "clean-density / clean-top-pair"
+    descriptor is now assigned ONLY from actual Stage-2 evidence: the
+    single highest-similarity selected pair is CC, CC pairs are the
+    plurality of the selected pair set, or Stage 2 actually removed a
+    clean passage (which is also equivalent here to "clean passages
+    dominate the top `N_adv` frequency-score ranking," since the removed
+    set IS that top-`N_adv` ranking by construction)."""
     labels: List[str] = []
 
     if residual_poison == 0:
@@ -245,9 +266,8 @@ def _classify_query(
     if removed_clean > 0:
         labels.append("clean over-removal")
 
-    flagged_poison = int(np.sum(is_poison[adv_flag])) if n_adv > 0 else 0
-    flagged_clean = int(np.sum(~is_poison[adv_flag])) if n_adv > 0 else 0
-    if top_pair_label == "CC" or (n_adv > 0 and flagged_clean > flagged_poison):
+    cc_is_plurality = cc_count > pp_count and cc_count > pc_count
+    if top_pair_label == "CC" or cc_is_plurality or removed_clean > removed_poison:
         labels.append("clean-density / clean-top-pair failure")
 
     n_categories_present = sum(1 for c in (pp_count, pc_count, cc_count) if c > 0)
@@ -306,13 +326,28 @@ def run_gate_b_query(case: dict, s_model, st_util, output_dir: Path) -> dict:
         residual_poison / case["n_retrieved_poison"] if case["n_retrieved_poison"] > 0 else float("nan")
     )
 
+    # STEP 2 correction: classification uses ONLY Stage-2 evidence
+    # (removed/residual counts, selected-pair PP/PC/CC composition) --
+    # never `stage1.adv_flag` or `is_poison[stage1.adv_flag]`. See
+    # `_classify_query`'s docstring for why that Stage-1-flag-based
+    # inference was removed, not merely relabeled.
     classification = _classify_query(
-        stage1.n_adv_estimated, is_poison, stage1.adv_flag, top_pair_label,
-        removed_poison, removed_clean, residual_poison, pp_count, pc_count, cc_count,
+        removed_poison, removed_clean, residual_poison, top_pair_label, pp_count, pc_count, cc_count,
     )
 
     geometry = _geometry_stats(matrix, is_poison)
 
+    # NOTE on the four `*flag*` fields below (STEP 2 taxonomy correction):
+    # `above_mean_flags`/`above_median_flags`/`final_and_flags`/
+    # `final_adv_flag_indices` are Stage-1 COUNT-ESTIMATION INDICATOR
+    # FLAGS. Their only formal role is determining `n_adv` (a single
+    # integer, via `sum(final_and_flags)`). They are NOT a predicted
+    # adversarial-passage subset -- Stage 2 independently decides WHICH
+    # `n_adv` passages actually get removed (`removed_indices` below,
+    # ranked by `frequency_scores_i`, which can be, and on this dataset
+    # sometimes is, a different index set than `final_adv_flag_indices`).
+    # Kept here as useful intermediate diagnostics only; do not use them
+    # to derive a mechanism-level classification -- see `_classify_query`.
     return {
         "query_id": query_id,
         "k": k,
@@ -665,6 +700,13 @@ def write_report(
     lines.append("")
     lines.append("- `gate_b_per_query.csv` -- one row per query with every requested Gate-B field "
                   "(geometry, Stage-1 vectors/margins, Stage-2 pair/frequency detail, outcome, classification).")
+    lines.append(
+        "  - **Taxonomy note:** `above_mean_flags`/`above_median_flags`/`final_and_flags`/"
+        "`final_adv_flag_indices` are Stage-1 **count-estimation indicator flags only** (they determine "
+        "`n_adv`, a single integer). They are NOT a predicted adversarial-passage subset and were never "
+        "used to derive `classification` -- `classification` is computed solely from Stage-2 evidence "
+        "(`removed_indices`, `selected_pair_classes`, outcome counts). See `_classify_query`'s docstring."
+    )
     lines.append("- `gate_b_comparison.csv` -- the three-way (Legacy/Gate A/Gate B) comparison table.")
     lines.append("- `similarity/{query_id}_stella_similarity_matrix.npy` -- full k x k Stella cosine-similarity matrix per query.")
     lines.append("- `embeddings/{query_id}_stella_embeddings.npy` -- raw Stella passage embeddings per query.")

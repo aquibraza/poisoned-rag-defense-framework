@@ -284,6 +284,17 @@ def _apply_defense_paper(doc_list: List[str], mode: str, s_model, top_k: Optiona
       from a fresh encode of `doc_list` (mirrors `_top_similar_pairs`'
       encode-again pattern in the legacy path below, kept for structural
       parity rather than optimized away).
+
+    EMPTY SAFE-CONTEXT BEHAVIOR (paper vs. legacy, deliberately different --
+    see plan §0a/Gate-B-followup "STEP 1"): the paper defines the safe
+    context conceptually as R_safe = R_tilde \\ R_adv, with no restore-all
+    fallback if R_adv == R_tilde (i.e. if Stage 2 selects every retrieved
+    passage for removal). `ragdefender_legacy`'s historical
+    `if not clean_docs: clean_docs = doc_list` fallback is NOT paper-specified
+    behavior, so `ragdefender_paper` must NOT inherit it: if Stage 2 removes
+    every passage here, this function returns an empty list, not
+    `doc_list`. `ragdefender_legacy`'s own fallback (in `apply_defense`
+    below) is left completely unchanged for historical reproducibility.
     """
     if mode == "singlehop":
         num_adv = _find_num_adversarial_agg(doc_list, s_model)
@@ -303,9 +314,11 @@ def _apply_defense_paper(doc_list: List[str], mode: str, s_model, top_k: Optiona
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
+    # Paper behavior: R_safe = R_tilde \ R_adv, with NO restore-all fallback
+    # if that difference is empty -- unlike ragdefender_legacy below, whose
+    # historical `if not clean_docs: clean_docs = doc_list` fallback is
+    # deliberately NOT reproduced here (not paper-specified).
     clean_docs = [doc for i, doc in enumerate(doc_list) if i not in suspect_indices]
-    if not clean_docs:
-        clean_docs = doc_list
     return clean_docs[:top_k] if top_k else clean_docs
 
 
@@ -389,6 +402,10 @@ def apply_defense(
 
     clean_docs = [doc for i, doc in enumerate(doc_list) if i not in suspect_indices]
 
+    # Legacy behavior: historical restore-all fallback, preserved byte-
+    # identically for reproducibility of past ragdefender_legacy runs. This
+    # is NOT paper-specified and is deliberately NOT inherited by
+    # ragdefender_paper's `_apply_defense_paper` above (see its docstring).
     if not clean_docs:
         clean_docs = doc_list
 
