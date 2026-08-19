@@ -220,9 +220,11 @@ broken" -- this is an n=8, non-prospectively-sampled population (see §7).
 | Prospective population freeze (STEP 3) | **COMPLETE** | §9 below, `results/diagnostics/ragdefender_expanded_baseline/PROSPECTIVE_POPULATION_FREEZE.md` |
 | Expanded paper-faithful baseline (STEP 4) | **COMPLETE** (n=42) | `results/diagnostics/ragdefender_expanded_baseline/` |
 | Expanded Gate-C oracle-count decomposition (STEP 5) | **COMPLETE** (n=42) | `results/diagnostics/ragdefender_expanded_gate_c/` |
-| Mechanism decision report (STEP 6) | **COMPLETE** -- Decision C (two regime-conditioned failure modes) | `results/diagnostics/ragdefender_mechanism_decision/` |
+| Mechanism decision report (STEP 6) | **COMPLETE** -- Decision C (two regime-conditioned failure modes); corrected re: Regime A (untested) / Regime D (degenerate oracle evidence) | `results/diagnostics/ragdefender_mechanism_decision/` |
 | E1 clean-anchor oracle / CORAL / MMD rerun on paper-faithful population | **STILL PAUSED** -- the mechanism decision (§9.5) recommends two NEW Stage-1/Stage-2 oracles, not a resumption of E1/CORAL/MMD; do not resume merely because it was the old plan | -- |
 | Population expansion (prospective, unbiased HotpotQA k=10 sample) | **COMPLETE** (n=42, superseded §8's design-only status; see §9) | §9 |
+| Nominal HotpotQA k=2 mathematical/code/consistency audit (STEP 2-6 of the k2 audit task) | **COMPLETE** (math proof, authors'-code audit, 3-column consistency, synthetic tests) -- **real k=2 retrieval reproduction NOT run** | §9.6, `results/diagnostics/ragdefender_k2_consistency/` |
+| Environment reproducibility bridge (Gate B vs. this session) | **COMPLETE** -- identical env, identical Stella revision, byte-identical re-encoding | §9.7, `results/diagnostics/ragdefender_environment_bridge/` |
 | `docs/PAPER_RESTRUCTURE_STRESS_TESTING_PLAN.md` update | **NOT YET DONE** -- that document still describes only the pre-fidelity-correction legacy E1-E30 narrative; it needs a new section describing `ragdefender_paper`/Gates A-C before it is consistent with this document | -- |
 | `paper_latex/bigdata26_paper.tex` update | **NOT YET DONE, deliberately** -- manuscript Results section stays gated on the population-scale experiment (§9), per explicit instruction | -- |
 
@@ -253,13 +255,19 @@ broken" -- this is an n=8, non-prospectively-sampled population (see §7).
    underestimation alone (§5) -- a striking, internally consistent result
    -- but this population is small (n=8) and was not
    prospectively/unbiasedly selected. The n=42 prospective expansion
-   (§9.4-9.5) confirms count underestimation is the COMPLETE explanation
-   at/below the structural ceiling (Regime B: 14/14 failures fully
-   resolved by count correction alone) but reveals it is only a PARTIAL
-   explanation above the ceiling (Regime C: only 4/20 failures fully
-   resolved by count correction alone; the remaining 16/20 require
-   additional Stage-2 identification correction). See the mechanism
-   decision report for the full, regime-conditioned claim.
+   (§9.4-9.5) confirms that **at the ceiling (Regime B), Stage-1 count
+   underestimation completely explains all observed baseline failures in
+   this prospective sample** (14/14 failures fully resolved by count
+   correction alone); **below-ceiling behavior (Regime A) remains
+   untested, because the current population contains no Regime-A
+   queries** (0/42). Above the ceiling (Regime C), count correction is
+   only a PARTIAL explanation (only 4/20 failures fully resolved by count
+   correction alone; the remaining 16/20 require additional Stage-2
+   identification correction). See the mechanism decision report for the
+   full, regime-conditioned claim, including the correction that the
+   Regime-D (all-poison) oracle result is evidentially degenerate for
+   Stage-2 identification quality, not usable as a "Stage 2 is accurate"
+   claim.
 4. **The original legacy E1/CORAL/MMD results remain historical/
    exploratory and should not be polished for the final manuscript.**
    They were computed against `ragdefender_legacy` + MiniLM geometry, not
@@ -495,34 +503,124 @@ IDENTIFICATION-LIMITED** (C) -- i.e. a correct count with the unchanged
 Stage-2 procedure is NEVER, by itself, insufficient in this sample UNLESS
 the count itself is above the structural ceiling. Regime breakdown is the
 decisive cut: **B_AT_CEILING: 14/14 failures (100%) fully fixed by the
-oracle count alone**; **D_ALL_POISON: 3/3 (100%)** fixed (threat-model
-violation stress, interpret separately); **C_ABOVE_CEILING: only 4/20
-(20%)** fixed -- the remaining 16/20 still show residual poison and/or
-extra clean removal even when Stage 2 is handed the true (necessarily
-above-ceiling) count. Full detail:
+oracle count alone, with zero additional clean removals** -- this is the
+strongest available clean Stage-2-conditional-on-correct-count evidence
+in this population; **C_ABOVE_CEILING: only 4/20 (20%)** fixed -- the
+remaining 16/20 still show residual poison and/or extra clean removal
+even when Stage 2 is handed the true (necessarily above-ceiling) count;
+**D_ALL_POISON: 3/3 (100%)** fixed, but this result is **evidentially
+degenerate for Stage-2 identification quality**: when `M=k`, supplying
+the true count asks Stage 2 to remove every retrieved passage, so a
+"success" here provides no information about poison-vs-clean ranking
+ability and must not be read as corroborating Regime B's clean-Stage-2
+evidence. Full detail:
 `results/diagnostics/ragdefender_expanded_gate_c/EXPANDED_GATE_C_REPORT.md`.
 
 **Mechanism decision (STEP 6):** **DECISION C -- two distinct failure
 modes, separated by poison-count regime** (not the same "Decision A" story
-uniformly): at/below the ceiling, Stage-1 count estimation is the complete
-explanation of failure (Stage 2 is always accurate given the right count);
-above the ceiling, count correction is necessary but insufficient for 80%
-of failures, and a genuine, previously-unobserved Stage-2
-identification-capacity cost co-occurs. Recommends TWO follow-up oracles
-(Stage-1 count-sensitivity near the ceiling boundary, and a separate
-Stage-2 above-ceiling identification-capacity oracle), neither implemented
-here. Full detail, caveats, and exact manuscript-claim boundary:
+uniformly). Precisely: **at the ceiling (Regime B), Stage-1 count
+underestimation completely explains all observed baseline failures in
+this prospective sample** (Stage 2 is accurate whenever it is given the
+right count, evidenced by 14/14 zero-cost fixes); **below-ceiling behavior
+(Regime A) remains untested, because the current population contains no
+Regime-A queries**; **above the ceiling (Regime C)**, count correction is
+necessary but insufficient for 80% of failures, and a genuine,
+previously-unobserved Stage-2 identification-capacity cost co-occurs; and
+**the all-poison Regime-D result is preserved only as a separate
+threat-model-violation stress**, not as evidence of Stage-2 accuracy
+(see above). Recommends TWO follow-up oracles (Stage-1 count-sensitivity
+near the ceiling boundary, and a separate Stage-2 above-ceiling
+identification-capacity oracle), neither implemented here. Full detail,
+caveats, and exact manuscript-claim boundary:
 `results/diagnostics/ragdefender_mechanism_decision/RAGDEFENDER_MECHANISM_DECISION_REPORT.md`.
 
-### 9.6 Nominal HotpotQA k=2 sanity check
+### 9.6 Nominal HotpotQA k=2 mathematical/code/consistency audit (executed)
 
-**Not executed in this session** -- would require a fresh retrieval pass at
-`k=2` (no existing saved `k=2` HotpotQA retrieval/poisoning artifacts were
-found for this population), and new retrieval was not authorized for this
-task. Recorded as a **planned follow-up**. Structural implication to keep in
-mind when it is eventually run: `floor(2/2)=1`, and per §9.1's special case,
-`N_adv` is provably always exactly `0` at `k=2` regardless of similarity
-geometry -- so Eq. (3) can never flag a passage as adversarial under the
-nominal paper `k=2` setting. Its results, if/when produced, must be kept in
-a separate output directory and never aggregated with the k=10 stress-regime
-results (different retrieval regime, different `N_pairs` scale).
+**Real k=2 retrieval was NOT run** -- no existing saved `k=2` HotpotQA
+retrieval/poisoning artifact was found in this repository (§7 of the k=2
+report), and new retrieval was out of scope for this task. What WAS
+executed is a full mathematical, authors'-code, and specification-
+consistency audit, since the entire question ("does Eq. (3) do anything at
+`k=2`?") is answerable without any new retrieval or Stella call. Full
+detail: `results/diagnostics/ragdefender_k2_consistency/RAGDEFENDER_K2_CONSISTENCY_REPORT.md`,
+`results/diagnostics/ragdefender_k2_consistency/k2_synthetic_results.csv`.
+
+**Structural result (corollary of Eq. (3), independent of similarity
+geometry):** for a literal 2-element retrieved set, `s_mean_1 = s_mean_2 =
+s = sim(r1,r2)` (self-excluded mean over the single other passage) and
+`s_bar = s`, so `s_mean_i > s_bar` is false for both `i` (strict `>`
+against an identical value); hence `above_mean = [False, False]`,
+`adv_flag = [False, False]`, and **`N_adv = 0` always**, regardless of
+Stella embeddings, poison wording, median convention (lower-of-two-middle
+vs. average-of-two-middle — irrelevant here since the mean condition alone
+already forces `N_adv=0`), or the actual value of `s`. Verified both
+analytically and by direct call to `ragdefender_internals.concentration_stage1_paper`
+on 2x2 matrices for `s in {-0.5, 0.0, 0.3, 0.8, 0.99}` (`n_adv_estimated=0`
+in all 5 cases) plus a randomized synthetic sweep (see the CSV).
+
+**Authors' released code at literal k=2 (`RAGDefender/artifacts/main.py::find_num_adv`,
+observationally reproduced via the local `ragdefender_legacy` port,
+UNMODIFIED):** the opposite structural degeneracy. `avg[i] == avg_avg`
+and the median-threshold condition never fires either (for the same
+self-referential reason, but on the *diagonal-inclusive* legacy
+statistics), so `above_avg = above_median = [False, False]` and
+`sum(final) = 0` -- which triggers the legacy flip branch
+(`sum(final) > 0` is false), so **`n_adv = len(text_list) - 0 = k = 2`**:
+the legacy estimator flags **both** passages as adversarial, for every
+tested `s in {-0.5, 0.0, 0.3, 0.8, 0.99}`, independent of `s`. Stage 2
+then selects both indices, so the pre-fallback "safe" set is empty --
+however, `ragdefender_legacy`'s historical restore-all fallback
+(`if not clean_docs: clean_docs = doc_list`, `defense/defense_runner.py`)
+fires and the **final returned context is the full, unfiltered 2-passage
+input** -- i.e. legacy is *also* a no-op at literal `k=2` in terms of
+final output, but via a completely different internal path (Stage 1
+flags everything, Stage 2 tries to remove everything, the restore-all
+fallback undoes it) than `ragdefender_paper` (Stage 1 flags nothing,
+Stage 2 never runs). Both variants are a no-op on the FINAL returned
+context at literal `k=2`; their INTERNAL computations disagree completely
+(`N_adv=0` vs. `N_adv=2`).
+
+**Apparent specification/evaluation inconsistency (paper vs. code, cautious
+wording; see the k2 report for the full three-column analysis):** the
+final paper's own Hyperparameter Selection paragraph (§5) states, for
+HotpotQA, "We set the top-k retrieval parameter to be `k = |R̃| = 2`" --
+implying Eq. (3)'s sum (Stage 1) and Stage 2 both operate on a literal
+2-element set. However, the authors' released `RAGDefender/artifacts/main.py`
+constructs its actual Stage-1/2 input (`adv_text_now`) as up to
+`A_N` (default 5) adversarial candidate texts **plus all ground-truth
+gold passages** (`adv_text_now = adv_text_groups[...][:A_N] + ground_truth`),
+and only AFTER Stage 1/2 filtering does it apply `args.top_k` (=2) as a
+**separate, final truncation** of the *already-filtered* candidates,
+ranked by direct query-passage similarity -- a step that has nothing to
+do with RAGDefender's own Eq. (3)/Eq. (4-7) concentration-and-pair-
+frequency logic. Under the released code's default hyperparameters, the
+actual Stage-1/2 input size is therefore `5 + len(ground_truth)` (e.g. 7
+for HotpotQA's stated 2-gold-passage baseline), not 2. **The published
+top-k retrieval parameter and the authors' own released implementation's
+actual Stage-1/2 input size require reconciliation**; this report does
+not and cannot determine which one (if either) matches the exact
+configuration used to produce the paper's Table 4/5/9 HotpotQA numbers,
+and does not allege that those numbers are invalid or fabricated.
+
+**Tests:** `tests/test_ragdefender_hotpotqa_k2_consistency.py` (see the k2
+report for the full list). **Status: COMPLETE** (mathematical/code/test
+audit); **real k=2 retrieval reproduction: NOT RUN, would require new
+retrieval**.
+
+### 9.7 Environment reproducibility bridge (executed)
+
+Compared the exact Python/`transformers`/`sentence-transformers`/`torch`
+versions and the cached Stella snapshot revision used for THIS session
+(which produced the n=42 expanded baseline and this k=2 audit) against
+Gate B's recorded environment, and re-encoded Gate B's frozen
+zero-residual-poison-success fixture query
+(`5a722b8655429971e9dc9329`, `tests/fixtures/ragdefender_gate_b_real_hotpotqa_fixture.json`)
+with Stella in the current environment. Result: **identical package
+versions, identical cached Stella revision
+(`7817065102fd9e1b031fe874e910c01f40b2f001`), and a re-encoded cosine
+similarity matrix that matches the frozen Gate-B matrix with max absolute
+difference `0.0`** (Stage-1 `N_adv` and Stage-2 removed indices are also
+byte-identical). No environment drift was found between Gate B and the
+expanded baseline/this session. Full detail:
+`results/diagnostics/ragdefender_environment_bridge/ENVIRONMENT_BRIDGE_REPORT.md`.
+**Status: COMPLETE.**

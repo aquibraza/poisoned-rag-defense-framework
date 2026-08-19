@@ -207,10 +207,16 @@ A held-out feature-space oracle stress test shows that ML-FilterRAG-top-k is sen
 We further evaluate ML-FilterRAG-top-$k$ using a feature-space oracle stress test.  For each poisoned passage feature vector $z_{\mathrm{poison}}$, we construct $z'=\alpha z_{\mathrm{poison}}+(1-\alpha)z_{\mathrm{target}}$, where $z_{\mathrm{target}}$ is derived from clean-passage feature vectors.  The parameter $\alpha$ controls the intervention strength: $\alpha=1$ leaves the original poisoned features unchanged, while smaller $\alpha$ moves them toward clean-like feature statistics. This oracle does not rewrite passage text and therefore does not constitute a text-realizable attack; it tests whether the learned ML-FilterRAG decision boundary is fragile under clean-feature normalization.
 
 % \input{sections/baselines}
+\subsubsection{RobustRAG-KW}
+
+\subsubsection{RobustRAG-KW Oracle Test}
+In the 3-case full-retrieval pilot, RobustRAG-KW produced a different failure profile from RAGDefender, FilterRAG, and ML-FilterRAG. On the Ferocactus case, where low-overlap mutations weakened FilterRAG and ML-FilterRAG, RobustRAG-KW returned the correct answer. On the Gibson case, RobustRAG-KW also failed, showing that answer aggregation is not a universal defense. On the Schmeichel case, RobustRAG-KW abstained, suggesting a safety–coverage tradeoff.
 
 % --- V. Experimental Setup ---
 \section{Experimental Setup}
 % \input{sections/setup}
+
+
 
 % --- VI. Metrics and Evaluation Protocol ---
 \section{Metrics and Evaluation Protocol}
