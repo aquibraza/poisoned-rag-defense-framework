@@ -359,6 +359,21 @@ class GenerationCache:
                 self._entries[(rec["model_name"], rec["prompt_hash"])] = rec
         return self
 
+    def has(self, key: CacheKey) -> bool:
+        """Whether this prompt was already generated, independent of what it
+        generated. `get()` alone cannot answer this: a legitimately empty or
+        `None` completion is indistinguishable from a miss by its return value,
+        so a caller that branches on `get() is None` would silently pay for the
+        same prompt again. Callers that must not re-generate check `has()`."""
+        return self._key_tuple(key) in self._entries
+
+    def record(self, key: CacheKey) -> Optional[Dict]:
+        """The stored record, for callers that need its provenance metadata
+        (which session generated it, and from which run it was imported) rather
+        than just the completion. Read-only by contract: mutate via `put()`."""
+        rec = self._entries.get(self._key_tuple(key))
+        return dict(rec) if rec is not None else None
+
     def get(self, key: CacheKey, *, query_id: Optional[str] = None,
             context_type: Optional[str] = None) -> Optional[str]:
         rec = self._entries.get(self._key_tuple(key))

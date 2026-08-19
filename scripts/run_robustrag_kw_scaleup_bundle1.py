@@ -75,9 +75,11 @@ import robustrag_kw_scaleup_lib as lib  # noqa: E402
 from defense.asr_match import legacy_match, strict_match  # noqa: E402
 from defense.passages import RetrievedPassage  # noqa: E402
 from defense.robustrag_kw import (  # noqa: E402
+    CacheKey,
     GenerationCache,
     RobustRagKwConfig,
     aggregate_isolated,
+    prompt_hash,
     raising_generate_fn,
     robustrag_kw_answer,
 )
@@ -622,41 +624,12 @@ def stage_generate(args) -> None:
         print(f"[scaleup:generate] DRY RUN wrote {len(dry_prompts)} prompts to {path}")
         return
 
-    # Baseline defense conditions: 1 standard RAG generation per (case, defense).
-    baseline_rows = _load_existing_baselines(out_dir)
-    have = {(r["family"], r["query_id"], r["defense_name"]) for r in baseline_rows}
-    from src.prompts import wrap_prompt  # noqa: PLC0415
+    _, n_baseline_calls = generate_baselines(
+        cases, keys, cache=cache, generate_fn=generate_fn,
+        generator_model=generator_model, session_id=session_id,
+        out_dir=out_dir, smoke_dir=args.smoke_dir)
+    total_calls += n_baseline_calls
 
-    reused = _reuse_smoke_baselines(args, cases, keys, have)
-    baseline_rows.extend(reused)
-    have |= {(r["family"], r["query_id"], r["defense_name"]) for r in reused}
-
-    for family, qid in keys:
-        case = cases[(family, qid)]
-        for defense_name, threshold in BASELINE_CONDITIONS:
-            if (family, qid, defense_name) in have:
-                continue
-            kept = _passages_from_case(case, exclude_removed=REMOVAL_FLAG[defense_name])
-            prompt = wrap_prompt(case["question"], [p.text for p in kept], prompt_id=4)
-            raw = generate_fn(prompt)
-            total_calls += 1
-            counts = case["defense_counts"].get(
-                "ml_filterrag_t04" if defense_name == "ml_filterrag" else defense_name)
-            baseline_rows.append({
-                "family": family, "query_id": qid, "bundle_id": BUNDLE_ID,
-                "context_type": CONTEXT_TYPE, "defense_name": defense_name,
-                "threshold": threshold, "raw_output": raw,
-                "retrieved_poison_count": case["n_retrieved_poison"],
-                "removed_poison": (counts or {}).get("removed_poison", 0),
-                "remaining_poison": (counts or {}).get(
-                    "remaining_poison", case["n_retrieved_poison"]),
-                "generation_session_id": session_id,
-                "model_name": generator_model,
-                "source": "scaleup_generated",
-            })
-            print(f"[scaleup:generate] baseline {family} {qid[:8]} {defense_name}: {raw[:48]!r}")
-
-    write_jsonl(os.path.join(out_dir, BASELINE_ANSWERS_FILE), baseline_rows)
     cache.flush()
     n_persisted = _persist_cache(cache)
     print(f"[scaleup:generate] TOTAL NEW API CALLS THIS RUN: {total_calls}")
@@ -671,53 +644,213 @@ def _tag_session(cache: GenerationCache, result, session_id: str) -> None:
             rec.setdefault("generation_session_id", session_id)
 
 
+def generate_baselines(cases: Dict, keys: Sequence, *, cache: GenerationCache,
+                       generate_fn, generator_model: str, session_id: str,
+                       out_dir: str, smoke_dir: Optional[str] = None,
+                       verbose: bool = True) -> Tuple[List[Dict], int]:
+    """One standard-RAG generation per (shortlisted case, defense condition),
+    content-addressed by the same (model_name, prompt) cache the isolated calls
+    use. Returns the baseline records and the number of generator calls made.
+
+    The cache is what makes this safe to re-enter. An earlier version skipped
+    work by consulting the output JSONL, which a run only wrote at stage exit,
+    so overlapping runs each saw no prior output and each paid for the same
+    prompts. Here every prompt is looked up before it is generated and flushed
+    the moment it comes back, so a concurrent run finds it rather than repeats
+    it."""
+    n_backfilled = _backfill_baseline_cache(cache, cases, keys, out_dir, generator_model)
+    n_smoke = _seed_cache_from_smoke(cache, smoke_dir, cases, keys, generator_model)
+    if verbose and (n_backfilled or n_smoke):
+        print(f"[scaleup:generate] baseline cache seeded: {n_backfilled} from published "
+              f"scale-up answers, {n_smoke} from the published smoke run")
+
+    rows: List[Dict] = []
+    n_calls = 0
+    for family, qid in keys:
+        case = cases[(family, qid)]
+        for defense_name, threshold in BASELINE_CONDITIONS:
+            prompt = baseline_prompt(case, defense_name)
+            key = CacheKey(prompt_hash=prompt_hash(prompt, generator_model),
+                           model_name=generator_model)
+            cached = cache.has(key) or _adopt_from_disk(cache, key)
+            if cached:
+                raw = cache.get(key, query_id=qid, context_type=CONTEXT_TYPE)
+            else:
+                raw = generate_fn(prompt)
+                n_calls += 1
+                cache.put(key, raw, _baseline_cache_meta(
+                    case, defense_name, threshold, session_id, "scaleup_generated"))
+                cache.flush()
+                if verbose:
+                    print(f"[scaleup:generate] baseline {family} {qid[:8]} {defense_name}: "
+                          f"{(raw or '')[:48]!r}")
+            rows.append(_baseline_row(case, defense_name, threshold, raw, key,
+                                      cache_record=cache.record(key), cache_hit=cached))
+        write_jsonl(os.path.join(out_dir, BASELINE_ANSWERS_FILE), rows)
+    return rows, n_calls
+
+
 def _load_existing_baselines(out_dir: str) -> List[Dict]:
     path = os.path.join(out_dir, BASELINE_ANSWERS_FILE)
     return load_jsonl(path) if os.path.exists(path) else []
 
 
-def _reuse_smoke_baselines(args, cases, keys, have) -> List[Dict]:
-    """Reuse the published smoke run's mutated-context baseline answers for
-    any shortlisted case it already covers, instead of paying for them again.
-    Only reused when the case's retrieved poison count matches the smoke run's,
-    i.e. the context it answered is the one we shortlisted."""
-    path = os.path.join(args.smoke_dir, "answer_generation_outputs.jsonl")
+def baseline_prompt(case: Dict, defense_name: str) -> str:
+    """The standard-RAG prompt for one (case, defense) baseline condition.
+
+    Single source of truth: generation, cache backfill, and the tests all build
+    the prompt here, so a cached baseline is keyed by the exact string that was
+    sent to the generator rather than by a tuple that merely describes it."""
+    from src.prompts import wrap_prompt  # noqa: PLC0415
+    kept = _passages_from_case(case, exclude_removed=REMOVAL_FLAG[defense_name])
+    return wrap_prompt(case["question"], [p.text for p in kept], prompt_id=4)
+
+
+def _baseline_cache_meta(case: Dict, defense_name: str, threshold: Optional[float],
+                         session_id: str, source: str) -> Dict:
+    """Cache metadata for a baseline generation. Deliberately not part of the
+    cache key: two runs that label the same prompt differently must still share
+    one generation, so `defense_name`, `family` and provenance ride along as
+    descriptive fields only."""
+    return {
+        "kind": "baseline",
+        "family": case["family"],
+        "query_id": case["query_id"],
+        "defense_name": defense_name,
+        "threshold": threshold,
+        "context_type": CONTEXT_TYPE,
+        "bundle_id": BUNDLE_ID,
+        "generation_session_id": session_id,
+        "source": source,
+    }
+
+
+def _baseline_row(case: Dict, defense_name: str, threshold: Optional[float],
+                  raw: Optional[str], key: CacheKey,
+                  cache_record: Optional[Dict], cache_hit: bool) -> Dict:
+    """Project one cached baseline generation into the report's record shape.
+    Provenance is read back from the cache record, so a reused answer keeps the
+    session that actually produced it rather than the session that replayed it."""
+    rec = cache_record or {}
+    counts = case["defense_counts"].get(
+        "ml_filterrag_t04" if defense_name == "ml_filterrag" else defense_name)
+    return {
+        "family": case["family"], "query_id": case["query_id"], "bundle_id": BUNDLE_ID,
+        "context_type": CONTEXT_TYPE, "defense_name": defense_name,
+        "threshold": threshold, "raw_output": raw,
+        "retrieved_poison_count": case["n_retrieved_poison"],
+        "removed_poison": (counts or {}).get("removed_poison", 0),
+        "remaining_poison": (counts or {}).get(
+            "remaining_poison", case["n_retrieved_poison"]),
+        "generation_session_id": rec.get("generation_session_id"),
+        "model_name": key.model_name,
+        "source": rec.get("source", "scaleup_generated"),
+        "prompt_sha256": key.prompt_hash,
+        "cache_hit": cache_hit,
+    }
+
+
+def _adopt(cache: GenerationCache, key: CacheKey, raw: Optional[str], meta: Dict) -> bool:
+    """Insert an already-paid-for generation without marking it pending.
+
+    Backfilled records are historical: they were written to disk by an earlier
+    session and are re-derived here only so this run can recognise them. Routing
+    them through `put()` would restamp `created_at` with the replay time and
+    destroy the provenance the published artifacts are audited against."""
+    if cache.has(key):
+        return False
+    rec = dict(meta)
+    rec.update({"prompt_hash": key.prompt_hash, "model_name": key.model_name,
+                "raw_answer": raw})
+    rec.setdefault("context_types", [CONTEXT_TYPE])
+    cache._entries[cache._key_tuple(key)] = rec  # noqa: SLF001
+    return True
+
+
+def _adopt_from_disk(cache: GenerationCache, key: CacheKey) -> bool:
+    """Last check before paying: has another run written this prompt since we
+    loaded the cache? Overlapping approval-gated runs load the cache minutes
+    apart, so an in-memory-only check would let the later run pay for prompts
+    the earlier one had already flushed. Re-reads rather than re-`load()`s so
+    session tags on in-memory records are not clobbered by their disk copies."""
+    if not (cache.path and os.path.exists(cache.path)):
+        return False
+    for rec in load_jsonl(cache.path):
+        if (rec.get("model_name"), rec.get("prompt_hash")) != (key.model_name, key.prompt_hash):
+            continue
+        return _adopt(cache, key, rec.get("raw_answer"), rec)
+    return False
+
+
+def _backfill_baseline_cache(cache: GenerationCache, cases: Dict, keys: Sequence,
+                             out_dir: str, generator_model: str) -> int:
+    """Re-key the published baseline answers by prompt hash.
+
+    They predate this cache, so without this every shortlisted baseline would
+    look like a miss and be regenerated -- the exact waste this change exists to
+    stop. Prompts are rebuilt from the retrieval artifact, which is what the
+    original run generated from, so the hash is theirs and not a fresh claim."""
+    path = os.path.join(out_dir, BASELINE_ANSWERS_FILE)
     if not os.path.exists(path):
-        return []
-    smoke_rows = load_jsonl(path)
-    out: List[Dict] = []
+        return 0
+    wanted = set(keys)
+    n = 0
+    for row in load_jsonl(path):
+        case = cases.get((row["family"], row["query_id"]))
+        if case is None or (row["family"], row["query_id"]) not in wanted:
+            continue
+        model = row.get("model_name") or generator_model
+        prompt = baseline_prompt(case, row["defense_name"])
+        key = CacheKey(prompt_hash=prompt_hash(prompt, model), model_name=model)
+        meta = _baseline_cache_meta(
+            case, row["defense_name"], row.get("threshold"),
+            row.get("generation_session_id") or "unknown_prior_session",
+            row.get("source", "scaleup_generated"))
+        meta["created_at"] = row.get("created_at", "backfilled_from_published_answers")
+        n += int(_adopt(cache, key, row.get("raw_output"), meta))
+    return n
+
+
+def _seed_cache_from_smoke(cache: GenerationCache, smoke_dir: Optional[str], cases: Dict,
+                           keys: Sequence, generator_model: str) -> int:
+    """Adopt the published smoke run's baseline answers for the cases it covers.
+
+    Only adopted when the smoke run's recorded prompt is byte-identical to the
+    one we would send: the answer is then literally this prompt's completion.
+    A near-miss is refused rather than reused, since a context that differs by
+    even one passage is a different experiment wearing the same label."""
+    if not smoke_dir:
+        return 0
+    path = os.path.join(smoke_dir, "answer_generation_inputs.jsonl")
+    outputs_path = os.path.join(smoke_dir, "answer_generation_outputs.jsonl")
+    if not (os.path.exists(path) and os.path.exists(outputs_path)):
+        return 0
+    prompts = {(r["query_id"], r["context_type"], r["defense_name"]): r
+               for r in load_jsonl(path)}
+    outputs = {(r["query_id"], r["context_type"], r["defense_name"]): r
+               for r in load_jsonl(outputs_path)}
+    n = 0
     for family, qid in keys:
-        if (family, qid) not in {(f, q) for f, q in lib.PILOT_CASES}:
+        if (family, qid) not in set(lib.PILOT_CASES):
             continue
         case = cases[(family, qid)]
         for defense_name, threshold in BASELINE_CONDITIONS:
-            if (family, qid, defense_name) in have:
+            k = (qid, CONTEXT_TYPE, defense_name)
+            if k not in prompts or k not in outputs:
                 continue
-            match = [
-                r for r in smoke_rows
-                if r["query_id"] == qid and r["context_type"] == CONTEXT_TYPE
-                and r["defense_name"] == defense_name
-                and (threshold is None or float(r.get("threshold") or 0) == threshold)
-            ]
-            if not match:
+            prompt = baseline_prompt(case, defense_name)
+            if prompts[k].get("generation_prompt") != prompt:
+                print(f"[scaleup:generate] smoke baseline {qid[:8]} {defense_name}: "
+                      "prompt differs from the reconstructed context; not reused")
                 continue
-            counts = case["defense_counts"].get(
-                "ml_filterrag_t04" if defense_name == "ml_filterrag" else defense_name)
-            out.append({
-                "family": family, "query_id": qid, "bundle_id": BUNDLE_ID,
-                "context_type": CONTEXT_TYPE, "defense_name": defense_name,
-                "threshold": threshold, "raw_output": match[0]["raw_output"],
-                "retrieved_poison_count": case["n_retrieved_poison"],
-                "removed_poison": (counts or {}).get("removed_poison", 0),
-                "remaining_poison": (counts or {}).get(
-                    "remaining_poison", case["n_retrieved_poison"]),
-                "generation_session_id": "published_smoke_run",
-                "model_name": match[0].get("generator_model", DEFAULT_GENERATOR_MODEL),
-                "source": "published_smoke_run_reused",
-            })
-    if out:
-        print(f"[scaleup:generate] reused {len(out)} baseline answers from the published smoke run")
-    return out
+            model = outputs[k].get("generator_model", generator_model)
+            key = CacheKey(prompt_hash=prompt_hash(prompt, model), model_name=model)
+            meta = _baseline_cache_meta(case, defense_name, threshold,
+                                        "published_smoke_run",
+                                        "published_smoke_run_reused")
+            meta["created_at"] = "imported_from_published_smoke_run"
+            n += int(_adopt(cache, key, outputs[k].get("raw_output"), meta))
+    return n
 
 
 # ---------------------------------------------------------------------------
@@ -1232,8 +1365,23 @@ def build_report(*, cases, keys, selection_rows, generation_rows, origin_rows,
     L.append("")
     L.append("- Retrieval, selection and reporting stages make zero API calls; only "
              "`--stage generate` can, and only for shortlisted cases.")
-    L.append("- Every generation is content-addressed by `sha256(model_name + prompt)`; reruns "
-             "replay from cache and the report stage installs a raising `generate_fn`.")
+    L.append("- Every generation -- isolated **and** baseline -- is content-addressed by "
+             "`sha256(model_name + prompt)`; reruns replay from cache and the report stage "
+             "installs a raising `generate_fn`.")
+    L.append("- Cache provenance: the published baseline answers predate baseline caching, and "
+             "were produced by overlapping approval-gated runs that each regenerated the same "
+             "baseline prompts (69 useful generations, 122 billed). The numbers in this report "
+             "are unaffected -- they are the answers those runs returned -- and re-deriving the "
+             "report from cache reproduces it byte for byte. Baseline generation now goes "
+             "through the same cache, so a rerun re-keys the published answers by prompt hash "
+             "instead of repeating them.")
+    L.append("- The 36 baseline conditions cover 28 distinct prompts: a filter that removed "
+             "nothing poses the same question as no filter, and a query shortlisted under "
+             "several mutation families poses the same question in each once its poison is "
+             "filtered. Those conditions now share one generation. Their published answers are "
+             "already identical except for one nondeterministic paraphrase "
+             "(`5ae224da` ragdefender/ml_filterrag, \"but\" vs \"while\"), which carries the "
+             "same strict-ASR and gold-match verdicts.")
     L.append("- Poison budget preserved: 5 mutated passages replace 5 original poison slots per "
              "query per family, asserted by `assert_budget_preserved`.")
     L.append("- `robustrag_kw` is not a member of `DEFENSE_CHOICES`; `run_defense()` and "

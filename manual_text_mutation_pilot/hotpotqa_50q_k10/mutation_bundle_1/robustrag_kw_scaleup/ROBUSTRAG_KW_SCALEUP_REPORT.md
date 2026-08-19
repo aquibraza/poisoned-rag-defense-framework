@@ -113,7 +113,9 @@ Across 38 isolated clean-passage calls: non-abstention **0.8421**, gold-match **
 ## Process confirmation
 
 - Retrieval, selection and reporting stages make zero API calls; only `--stage generate` can, and only for shortlisted cases.
-- Every generation is content-addressed by `sha256(model_name + prompt)`; reruns replay from cache and the report stage installs a raising `generate_fn`.
+- Every generation -- isolated **and** baseline -- is content-addressed by `sha256(model_name + prompt)`; reruns replay from cache and the report stage installs a raising `generate_fn`.
+- Cache provenance: the published baseline answers predate baseline caching, and were produced by overlapping approval-gated runs that each regenerated the same baseline prompts (69 useful generations, 122 billed). The numbers in this report are unaffected -- they are the answers those runs returned -- and re-deriving the report from cache reproduces it byte for byte. Baseline generation now goes through the same cache, so a rerun re-keys the published answers by prompt hash instead of repeating them.
+- The 36 baseline conditions cover 28 distinct prompts: a filter that removed nothing poses the same question as no filter, and a query shortlisted under several mutation families poses the same question in each once its poison is filtered. Those conditions now share one generation. Their published answers are already identical except for one nondeterministic paraphrase (`5ae224da` ragdefender/ml_filterrag, "but" vs "while"), which carries the same strict-ASR and gold-match verdicts.
 - Poison budget preserved: 5 mutated passages replace 5 original poison slots per query per family, asserted by `assert_budget_preserved`.
 - `robustrag_kw` is not a member of `DEFENSE_CHOICES`; `run_defense()` and `main.py` are untouched.
 - No model was trained or retrained.

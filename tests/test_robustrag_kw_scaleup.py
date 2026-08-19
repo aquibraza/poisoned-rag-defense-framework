@@ -23,6 +23,7 @@ for _p in (REPO_ROOT, SCRIPTS_DIR):
         sys.path.insert(0, _p)
 
 import robustrag_kw_scaleup_lib as lib  # noqa: E402
+import run_robustrag_kw_scaleup_bundle1 as scaleup  # noqa: E402
 
 from defense.robustrag_kw import (  # noqa: E402
     CacheKey,
@@ -34,6 +35,7 @@ from defense.robustrag_kw import (  # noqa: E402
     robustrag_kw_answer,
 )
 from defense.passages import RetrievedPassage  # noqa: E402
+from defense.asr_match import strict_match  # noqa: E402
 
 SCALEUP_SCRIPT = os.path.join(SCRIPTS_DIR, "run_robustrag_kw_scaleup_bundle1.py")
 SCALEUP_LIB = os.path.join(SCRIPTS_DIR, "robustrag_kw_scaleup_lib.py")
@@ -309,6 +311,258 @@ class TestCacheReuse(unittest.TestCase):
         for r in records:
             self.assertTrue(r.get("generation_session_id"),
                             f"prompt {r['prompt_hash'][:12]} has no session provenance")
+
+
+class TestBaselineGenerationCache(unittest.TestCase):
+    """Baseline answers are content-addressed by (model_name, prompt) exactly
+    like the isolated calls.
+
+    Regression suite for a real incident: baselines used to be skipped by
+    consulting the output JSONL, which a run only wrote at stage exit, so
+    overlapping approval-gated runs each saw no prior output and each paid for
+    the same prompts -- 69 useful generations billed as 122. Every test here
+    counts generator invocations; none of them can reach an API.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.out_dir = self.tmp.name
+        self.calls = []
+        self.cases = {
+            ("filterrag_targeted", "q1"): self._case("filterrag_targeted", "q1"),
+            ("ragdefender_targeted", "q2"): self._case("ragdefender_targeted", "q2"),
+        }
+        self.keys = list(self.cases.keys())
+
+    def _case(self, family, qid, *, removals=None):
+        """Each defense removes a different passage by default, so the four
+        baseline conditions are four distinct contexts and therefore four
+        distinct prompts. Pass `removals` to make two conditions coincide."""
+        removals = removals or {"ragdefender": {1}, "filterrag_semantic": {2},
+                                "ml_filterrag": {3}}
+        passages = [{"doc_id": f"{qid}-d0", "context": f"Clean text for {qid}.",
+                     "is_poison": False, "source": "corpus", "rank": 1,
+                     "origin_label": lib.ORIGIN_CLEAN}]
+        for i in (1, 2, 3):
+            passages.append({
+                "doc_id": f"{qid}-p{i}", "context": f"Poison {i} for {qid}.",
+                "is_poison": True, "source": "adversarial", "rank": i + 1,
+                "origin_label": lib.ORIGIN_MUTATED_SELF})
+        for p_i, p in enumerate(passages):
+            for defense, removed in removals.items():
+                p[scaleup.REMOVAL_FLAG[defense]] = p_i in removed
+        return {
+            "family": family, "query_id": qid, "question": f"Question for {qid}?",
+            "correct_answer": "Paris", "target_wrong_answer": "London",
+            "passages": passages, "n_retrieved_poison": 3, "n_retrieved_clean": 1,
+            "defense_counts": {d: {"removed_poison": 1, "remaining_poison": 2}
+                               for d in ("ragdefender", "filterrag_semantic",
+                                         "ml_filterrag_t04")},
+        }
+
+    def _stub(self, prompt):
+        self.calls.append(prompt)
+        return f"answer::{len(self.calls)}"
+
+    def _run(self, cache, *, generate_fn=None, session_id="s1", model="gpt-3.5-turbo"):
+        return scaleup.generate_baselines(
+            self.cases, self.keys, cache=cache,
+            generate_fn=generate_fn or self._stub, generator_model=model,
+            session_id=session_id, out_dir=self.out_dir, smoke_dir=None, verbose=False)
+
+    def _cache(self):
+        return GenerationCache(os.path.join(self.out_dir, "cache.jsonl")).load()
+
+    def test_repeat_run_regenerates_nothing(self):
+        rows, n = self._run(self._cache())
+        expected = len(self.keys) * len(scaleup.BASELINE_CONDITIONS)
+        self.assertEqual(n, expected)
+        self.assertEqual(len(self.calls), expected)
+
+        rows2, n2 = self._run(self._cache(), generate_fn=raising_generate_fn)
+        self.assertEqual(n2, 0, "a repeated run paid for prompts it already had")
+        self.assertEqual(len(self.calls), expected)
+        self.assertEqual([r["raw_output"] for r in rows],
+                         [r["raw_output"] for r in rows2],
+                         "replayed answers differ from the ones first generated")
+        self.assertTrue(all(r["cache_hit"] for r in rows2))
+
+    def test_overlapping_run_sees_partial_work_flushed_by_the_other(self):
+        """The incident, reproduced: a second run starts while the first is
+        mid-stage. It must pick up what the first has already flushed, which
+        only works because flushes are per-generation rather than at exit."""
+        first = self._cache()
+        one_key = self.keys[:1]
+        scaleup.generate_baselines(
+            self.cases, one_key, cache=first, generate_fn=self._stub,
+            generator_model="gpt-3.5-turbo", session_id="run_a",
+            out_dir=self.out_dir, smoke_dir=None, verbose=False)
+        done = len(self.calls)
+        self.assertEqual(done, len(scaleup.BASELINE_CONDITIONS))
+
+        _, n = self._run(self._cache(), session_id="run_b")
+        self.assertEqual(n, len(scaleup.BASELINE_CONDITIONS),
+                         "run B repaid for prompts run A had already flushed")
+        self.assertEqual(len(self.calls), done + n)
+
+    def test_run_started_before_the_other_flushed_still_reuses_its_work(self):
+        """Worst case: run B loaded the cache while it was still empty. The
+        pre-generation disk re-check is the only thing standing between it and
+        a duplicate bill."""
+        stale = self._cache()
+        self.assertEqual(len(stale), 0)
+
+        scaleup.generate_baselines(
+            self.cases, self.keys, cache=self._cache(), generate_fn=self._stub,
+            generator_model="gpt-3.5-turbo", session_id="run_a",
+            out_dir=self.out_dir, smoke_dir=None, verbose=False)
+        paid = len(self.calls)
+
+        _, n = self._run(stale, generate_fn=raising_generate_fn, session_id="run_b")
+        self.assertEqual(n, 0, "a stale in-memory cache caused a duplicate bill")
+        self.assertEqual(len(self.calls), paid)
+
+    def test_backfill_adopts_published_answers_that_predate_the_cache(self):
+        """Answers written before baselines were cached must be re-keyed by
+        prompt hash, not regenerated."""
+        rows, _ = self._run(self._cache())
+        os.remove(os.path.join(self.out_dir, "cache.jsonl"))
+        self.assertEqual(len(self._cache()), 0)
+
+        rows2, n = self._run(self._cache(), generate_fn=raising_generate_fn)
+        self.assertEqual(n, 0, "published baselines were regenerated, not adopted")
+        self.assertEqual([r["raw_output"] for r in rows], [r["raw_output"] for r in rows2])
+
+    def test_cache_key_distinguishes_prompts_and_models(self):
+        cache = self._cache()
+        self._run(cache)
+        paid = len(self.calls)
+
+        _, n = self._run(self._cache(), model="gpt-4")
+        self.assertEqual(n, paid, "a different model reused another model's answers")
+
+        hashes = {scaleup.prompt_hash(
+            scaleup.baseline_prompt(self.cases[k], d), "gpt-3.5-turbo")
+            for k in self.keys for d, _ in scaleup.BASELINE_CONDITIONS}
+        self.assertEqual(len(hashes), paid, "distinct baseline contexts collided")
+
+    def test_conditions_with_an_identical_context_share_one_generation(self):
+        """A filter that removed nothing is asking the generator the same
+        question as no filter at all. Paying twice for that buys only a
+        nondeterministic paraphrase, so the two conditions share a generation
+        and are reported with the same answer."""
+        self.cases = {("filterrag_targeted", "q1"): self._case(
+            "filterrag_targeted", "q1",
+            removals={"ragdefender": {1}, "filterrag_semantic": set(),
+                      "ml_filterrag": {2}})}
+        self.keys = list(self.cases.keys())
+
+        rows, n = self._run(self._cache())
+        self.assertEqual(n, len(scaleup.BASELINE_CONDITIONS) - 1,
+                         "an empty filter was billed as a separate condition")
+        by_defense = {r["defense_name"]: r for r in rows}
+        self.assertEqual(by_defense["none"]["raw_output"],
+                         by_defense["filterrag_semantic"]["raw_output"])
+        self.assertTrue(by_defense["filterrag_semantic"]["cache_hit"])
+        counts = self.cases[self.keys[0]]["defense_counts"]
+        for defense, row in by_defense.items():
+            expected = counts.get(
+                "ml_filterrag_t04" if defense == "ml_filterrag" else defense, {})
+            self.assertEqual(row["removed_poison"], expected.get("removed_poison", 0),
+                             "sharing a generation merged the defenses' own counts")
+
+    def test_metadata_differences_do_not_force_regeneration(self):
+        """`defense_name`, session and threshold are descriptive, not part of
+        the key: two labels for one prompt must share one generation."""
+        cache = self._cache()
+        case = self.cases[self.keys[0]]
+        prompt = scaleup.baseline_prompt(case, "none")
+        key = CacheKey(prompt_hash=scaleup.prompt_hash(prompt, "gpt-3.5-turbo"),
+                       model_name="gpt-3.5-turbo")
+        cache.put(key, "seeded answer", scaleup._baseline_cache_meta(
+            case, "some_other_label", 0.99, "an_older_session", "elsewhere"))
+        cache.flush()
+
+        rows, _ = self._run(self._cache(), session_id="new_session")
+        row = next(r for r in rows
+                   if r["query_id"] == case["query_id"] and r["defense_name"] == "none")
+        self.assertEqual(row["raw_output"], "seeded answer")
+        self.assertNotIn(prompt, self.calls)
+        self.assertEqual(row["generation_session_id"], "an_older_session",
+                         "replaying a generation rewrote the session that made it")
+
+    def test_row_shape_stays_compatible_with_the_report_reader(self):
+        rows, _ = self._run(self._cache())
+        required = {"family", "query_id", "bundle_id", "context_type", "defense_name",
+                    "threshold", "raw_output", "retrieved_poison_count",
+                    "removed_poison", "remaining_poison", "generation_session_id",
+                    "model_name", "source"}
+        for r in rows:
+            self.assertTrue(required.issubset(r.keys()))
+            self.assertEqual(r["prompt_sha256"],
+                             scaleup.prompt_hash(
+                                 scaleup.baseline_prompt(
+                                     self.cases[(r["family"], r["query_id"])],
+                                     r["defense_name"]), r["model_name"]))
+
+    def _replay_published(self):
+        src = os.path.join(OUT_DIR, "robustrag_kw_scaleup_baseline_answers.jsonl")
+        retrieval = os.path.join(OUT_DIR, "robustrag_kw_scaleup_retrieval.jsonl")
+        if not (os.path.exists(src) and os.path.exists(retrieval)):
+            self.skipTest("scale-up artifacts not present")
+        published = scaleup.load_jsonl(src)
+        cases = {scaleup.case_key(c): c for c in scaleup.load_jsonl(retrieval)}
+        keys = sorted({(r["family"], r["query_id"]) for r in published})
+        scaleup.write_jsonl(
+            os.path.join(self.out_dir, scaleup.BASELINE_ANSWERS_FILE), published)
+        rows, n = scaleup.generate_baselines(
+            cases, keys, cache=self._cache(), generate_fn=raising_generate_fn,
+            generator_model="gpt-3.5-turbo", session_id="replay",
+            out_dir=self.out_dir, smoke_dir=None, verbose=False)
+        return cases, published, rows, n
+
+    def test_published_baselines_all_replay_from_cache_without_generating(self):
+        """The published run, re-derived: with the fix in place, not one of the
+        36 baseline answers costs a call the second time around."""
+        _, published, rows, n = self._replay_published()
+        self.assertEqual(n, 0, "re-deriving the published baselines would cost API calls")
+        self.assertEqual(len(rows), len(published))
+
+    def test_replaying_published_baselines_changes_no_verdict(self):
+        """Content addressing merges baseline conditions whose kept context is
+        identical -- a filter that removed nothing answers the same prompt as
+        no filter at all, and one query shared across mutation families answers
+        the same prompt in each. Merging them may swap a nondeterministic
+        paraphrase for its twin, so what has to hold is that no strict-ASR or
+        gold-match verdict moves, and that no answer changes except where two
+        published rows really were the same prompt."""
+        cases, published, rows, _ = self._replay_published()
+        by_key = {(r["family"], r["query_id"], r["defense_name"]): r for r in published}
+        shared = self._prompts_shared_by_multiple_rows(cases, published)
+        for row in rows:
+            k = (row["family"], row["query_id"], row["defense_name"])
+            old, new = by_key[k]["raw_output"], row["raw_output"]
+            case = cases[(row["family"], row["query_id"])]
+            for label, ref in (("strict ASR", case["target_wrong_answer"]),
+                               ("gold match", case["correct_answer"])):
+                self.assertEqual(strict_match(old, ref), strict_match(new, ref),
+                                 f"{label} verdict moved for {k}")
+            if old != new:
+                self.assertIn(row["prompt_sha256"], shared,
+                              f"{k} changed answer without sharing a prompt")
+
+    @staticmethod
+    def _prompts_shared_by_multiple_rows(cases, published):
+        seen, shared = {}, set()
+        for r in published:
+            h = scaleup.prompt_hash(
+                scaleup.baseline_prompt(cases[(r["family"], r["query_id"])],
+                                        r["defense_name"]), "gpt-3.5-turbo")
+            if h in seen:
+                shared.add(h)
+            seen[h] = r
+        return shared
 
 
 class TestOutputSchemas(unittest.TestCase):
