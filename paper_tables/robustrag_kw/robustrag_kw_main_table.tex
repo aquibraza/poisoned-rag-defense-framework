@@ -1,0 +1,27 @@
+% Requires \usepackage{booktabs}.
+\begin{table*}[t]
+\centering
+\scriptsize
+\caption{RobustRAG-KW generation-time aggregation compared with passage-filtering defenses on shortlisted full-retrieval mutation cases.}
+\label{tab:robustrag-kw-comparison}
+\begin{tabular}{llclcccl}
+\toprule
+Family & Query & Self-poison & Passage filters & RRKW & $s_{\mathrm{wrong}}$ & $s_{\mathrm{gold}}$ & Reading \\
+\midrule
+FR-tgt & Gibson/Zurracapote gin & 5/5 & RD=ASR, FR=ASR, ML=ASR & ASR & 0.90 & 0.10 & Filter failure not fixed \\
+FR-tgt & Menges/Avakian occupation & 5/5 & RD=Def., FR=ASR, ML=ASR & ASR & 0.50 & 0.00 & Poison consensus failure \\
+FR-tgt & Schmeichel IFFHS 1992 & 5/5 & RD=Def., FR=Def., ML=Abs. & Abs. & 0.50 & 0.20 & Abstention under contested votes \\
+FR-tgt & Teide/Garajonay parks & 5/5 & RD=Def., FR=Def., ML=Def. & Abs. & 0.30 & 0.40 & Abstention under contested votes \\
+FR-tgt & Roth/Childers England & 5/7 & RD=Def., FR=Def., ML=ASR & Abs. & 0.50 & 0.50 & Abstention under contested votes \\
+FR-tgt & Ferocactus/Silene plants & 5/6 & RD=Def., FR=ASR, ML=ASR & Def. & 0.20 & 0.80 & Aggregation defends filter-evasion \\
+RD-tgt & Gibson/Zurracapote gin & 5/5 & RD=Def., FR=ASR, ML=Def. & Abs. & 0.90 & 0.10 & Abstention under contested votes \\
+RD-tgt & Roth/Childers England & 5/7 & RD=Def., FR=Def., ML=Def. & Abs. & 0.50 & 0.50 & Abstention under contested votes \\
+ML-tgt & Roth/Childers England & 5/7 & RD=Def., FR=Def., ML=Def. & Abs. & 0.50 & 0.50 & Abstention under contested votes \\
+\bottomrule
+\end{tabular}
+\begin{minipage}{\textwidth}
+\vspace{2pt}
+\scriptsize
+The 9 cases are a shortlisted, filter-stress sample, not a benchmark-wide rate. ASR means the target wrong answer was produced under strict matching; Def. means the target was not produced; Abs. denotes abstention.
+\end{minipage}
+\end{table*}
