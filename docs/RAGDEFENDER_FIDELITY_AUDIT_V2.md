@@ -224,7 +224,7 @@ broken" -- this is an n=8, non-prospectively-sampled population (see §7).
 | E1 clean-anchor oracle / CORAL / MMD rerun on paper-faithful population | **STILL PAUSED** -- the mechanism decision (§9.5) recommends two NEW Stage-1/Stage-2 oracles, not a resumption of E1/CORAL/MMD; do not resume merely because it was the old plan | -- |
 | Population expansion (prospective, unbiased HotpotQA k=10 sample) | **COMPLETE** (n=42, superseded §8's design-only status; see §9) | §9 |
 | Nominal HotpotQA k=2 mathematical/code/consistency audit (STEP 2-6 of the k2 audit task) | **COMPLETE** (math proof, authors'-code audit, 3-column consistency, synthetic tests) -- **real k=2 retrieval reproduction NOT run** | §9.6, `results/diagnostics/ragdefender_k2_consistency/` |
-| Environment reproducibility bridge (Gate B vs. this session) | **COMPLETE** -- identical env, identical Stella revision, byte-identical re-encoding | §9.7, `results/diagnostics/ragdefender_environment_bridge/` |
+| Environment reproducibility bridge (Gate B + n=42 expanded-baseline 5-query sample) | **COMPLETE** -- Gate B fixture: byte-identical re-encoding, identical recorded env. n=42 STEP-4 run: package-version provenance **UNRESOLVED** (recorded env differs from current); 5-query sample: 0/5 byte-identical, 5/5 decision-stable (N_adv/removed-set/outcome/Gate-C label all unchanged) | §9.7, `results/diagnostics/ragdefender_environment_bridge/` |
 | `docs/PAPER_RESTRUCTURE_STRESS_TESTING_PLAN.md` update | **NOT YET DONE** -- that document still describes only the pre-fidelity-correction legacy E1-E30 narrative; it needs a new section describing `ragdefender_paper`/Gates A-C before it is consistent with this document | -- |
 | `paper_latex/bigdata26_paper.tex` update | **NOT YET DONE, deliberately** -- manuscript Results section stays gated on the population-scale experiment (§9), per explicit instruction | -- |
 
@@ -602,6 +602,32 @@ not and cannot determine which one (if either) matches the exact
 configuration used to produce the paper's Table 4/5/9 HotpotQA numbers,
 and does not allege that those numbers are invalid or fabricated.
 
+**Operation-order observation:** the released artifact differs from the
+published pipeline not only in Stage-1/2 input cardinality, but also in
+*operation order*: RAGDefender is applied to a constructed candidate pool
+before the artifact's final top-k query-similarity selection, whereas the
+paper describes RAGDefender as operating on the retrieved set `R̃`. That
+is, in the released code, Stage 1/2 filtering happens first (on the
+larger `adv_text_now` candidate pool), and the `args.top_k=2` truncation
+by query-passage similarity happens second, on the already-filtered
+output -- the reverse of a literal reading of the paper's "RAGDefender
+operates on `R̃`, and `|R̃|=k=2`" framing, which would require the
+truncation to `k=2` to happen first (defining `R̃`) and RAGDefender to
+operate on that already-size-2 set second.
+
+**Cautious cardinality observation:** a literal reading of the paper's
+threat-model constraints implies `|R̃| >= M + 1` whenever all `M`
+adversarial passages and at least one benign passage are retrieved (the
+threat model requires at least one benign passage to survive retrieval).
+This is incompatible with `|R̃|=2` whenever `M>=2` -- i.e. whenever two or
+more adversarial passages are retrieved, a literal `|R̃|=2` would leave no
+room for the required benign passage. This suggests that the published
+notation or evaluation pipeline is underspecified with respect to how
+`R̃`'s size interacts with the number of adversarial passages actually
+retrieved, rather than that any reported result is fabricated or
+invalid -- this report does not allege misconduct and does not have
+evidence of any.
+
 **Tests:** `tests/test_ragdefender_hotpotqa_k2_consistency.py` (see the k2
 report for the full list). **Status: COMPLETE** (mathematical/code/test
 audit); **real k=2 retrieval reproduction: NOT RUN, would require new
@@ -611,16 +637,68 @@ retrieval**.
 
 Compared the exact Python/`transformers`/`sentence-transformers`/`torch`
 versions and the cached Stella snapshot revision used for THIS session
-(which produced the n=42 expanded baseline and this k=2 audit) against
-Gate B's recorded environment, and re-encoded Gate B's frozen
-zero-residual-poison-success fixture query
-(`5a722b8655429971e9dc9329`, `tests/fixtures/ragdefender_gate_b_real_hotpotqa_fixture.json`)
-with Stella in the current environment. Result: **identical package
-versions, identical cached Stella revision
-(`7817065102fd9e1b031fe874e910c01f40b2f001`), and a re-encoded cosine
-similarity matrix that matches the frozen Gate-B matrix with max absolute
-difference `0.0`** (Stage-1 `N_adv` and Stage-2 removed indices are also
-byte-identical). No environment drift was found between Gate B and the
-expanded baseline/this session. Full detail:
-`results/diagnostics/ragdefender_environment_bridge/ENVIRONMENT_BRIDGE_REPORT.md`.
-**Status: COMPLETE.**
+against Gate B's recorded environment, and separately against the
+n=42 expanded-baseline (STEP 4) run's own machine-written environment
+record, then re-encoded frozen fixture/frozen-population queries with
+Stella in the current environment to test reproducibility directly.
+
+**CORRECTION (post-review):** an earlier version of this section stated
+that Gate B and the expanded-baseline/current-session environments used
+"identical package versions." That is only true for the Gate-B
+comparison. It is **not** true for the expanded-baseline (STEP 4)
+comparison: `EXPANDED_BASELINE_REPORT.md`'s own "Dependency / environment
+record" (written dynamically at STEP-4 runtime via
+`transformers.__version__`/`sentence_transformers.__version__`/
+`torch.__version__`) records `transformers==4.57.0`,
+`sentence-transformers==5.1.1`, `torch==2.13.0` -- which differ from this
+session's currently-measured `4.57.6`/`5.1.2`/`2.8.0`. This is a
+contemporaneous, machine-written artifact and must not be silently
+overwritten or explained away. Two claims are kept explicitly separate:
+
+- **(A) Historical package-version provenance for the n=42
+  expanded-baseline run is UNRESOLVED.** We do not have a contemporaneous
+  artifact establishing which package versions were *actually* active
+  when STEP 4 ran beyond `EXPANDED_BASELINE_REPORT.md`'s own record,
+  which differs from what this session measures now. This is not
+  resolved by anything in this report.
+- **(B) Computational reproducibility is directly testable from frozen
+  texts/matrices, independent of (A), and IS tested here:**
+  - **Gate-B fixture (1 query, `5a722b8655429971e9dc9329`):** re-encoding
+    with Stella in the current environment reproduces the frozen cosine
+    similarity matrix with max absolute difference **`0.0`** (byte-level),
+    and Stage-1 `N_adv` / Stage-2 removed indices are also
+    byte-identical. Gate B's OWN recorded package versions (`4.57.6`/
+    `5.1.2`/`2.8.0`) do match this session's measured versions exactly --
+    this one-query result is not in tension with (A) because Gate B's own
+    record was never in question.
+  - **Expanded-baseline 5-query bridge (STEP 8 of this task, NEW):** five
+    queries selected from the n=42 population by a pre-declared
+    deterministic rule (first Regime-B success, first Regime-B failure,
+    first Regime-C M=6, first Regime-C M>=8, first Regime-D) were
+    re-encoded with Stella in the current environment and compared
+    against their historical saved matrices. Result: **0/5 byte-identical
+    at strict tolerance** (max abs diff `~5e-7`-`~8e-7`, small but
+    nonzero), **5/5 identical at loose tolerance**
+    (`atol=1e-6, rtol=1e-5`), and **5/5 decision-stable**: `N_adv`,
+    Stage-2 removed-index sets, zero-residual-poison outcomes, AND the
+    Gate-C oracle-count decomposition labels (A/B/C/D) are all unchanged
+    between the historical and re-encoded matrix for every one of the 5
+    queries. Full detail:
+    `results/diagnostics/ragdefender_environment_bridge/ENVIRONMENT_BRIDGE_REPORT.md`
+    §4, `expanded_baseline_bridge_5q.csv`.
+
+**Conclusion, stated at the correct scope:** "The sampled historical n=42
+outputs are reproducible in the current environment at the decision
+level" (5/5 sampled queries). This does **not** license "the historical
+package versions were definitely X" -- that remains an open,
+unresolved provenance question (A) -- and it does not certify
+byte-identical geometry reproduction for the n=42 population (only the
+single Gate-B fixture achieved that; the 5 expanded-baseline queries show
+small numeric drift that does not change any decision). Scripts:
+`scripts/run_ragdefender_expanded_baseline_bridge_5q.py`. Tests:
+`tests/test_ragdefender_expanded_baseline_bridge_5q.py` (26 tests, all
+pass; 1 gated live-Stella smoke test also passes with
+`RAGDEFENDER_LOAD_STELLA=1`). **Status: COMPLETE** (as a reproducibility
+bridge; historical package-version provenance for STEP 4 remains,
+and is expected to remain, unresolved absent a new contemporaneous
+artifact).
