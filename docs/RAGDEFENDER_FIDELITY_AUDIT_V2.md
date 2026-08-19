@@ -216,10 +216,15 @@ broken" -- this is an n=8, non-prospectively-sampled population (see §7).
 | Gate-B taxonomy correction | **COMPLETE** | §3 above |
 | Median-convention sensitivity (diagnostic) | **COMPLETE** | §4 above |
 | Gate C (oracle-count decomposition) | **COMPLETE** | §5 above |
-| E1 clean-anchor oracle / CORAL / MMD rerun on paper-faithful population | **PAUSED** -- gated on population expansion (§7); do not resume merely because it was the old plan | -- |
-| Population expansion (prospective, unbiased HotpotQA k=10 sample) | **PLANNED, NOT EXECUTED** | §7 (design only) |
+| Eq. (3) structural count-ceiling proof + validation | **COMPLETE** | §9 below |
+| Prospective population freeze (STEP 3) | **COMPLETE** | §9 below, `results/diagnostics/ragdefender_expanded_baseline/PROSPECTIVE_POPULATION_FREEZE.md` |
+| Expanded paper-faithful baseline (STEP 4) | **COMPLETE** (n=42) | `results/diagnostics/ragdefender_expanded_baseline/` |
+| Expanded Gate-C oracle-count decomposition (STEP 5) | **COMPLETE** (n=42) | `results/diagnostics/ragdefender_expanded_gate_c/` |
+| Mechanism decision report (STEP 6) | **COMPLETE** -- Decision C (two regime-conditioned failure modes) | `results/diagnostics/ragdefender_mechanism_decision/` |
+| E1 clean-anchor oracle / CORAL / MMD rerun on paper-faithful population | **STILL PAUSED** -- the mechanism decision (§9.5) recommends two NEW Stage-1/Stage-2 oracles, not a resumption of E1/CORAL/MMD; do not resume merely because it was the old plan | -- |
+| Population expansion (prospective, unbiased HotpotQA k=10 sample) | **COMPLETE** (n=42, superseded §8's design-only status; see §9) | §9 |
 | `docs/PAPER_RESTRUCTURE_STRESS_TESTING_PLAN.md` update | **NOT YET DONE** -- that document still describes only the pre-fidelity-correction legacy E1-E30 narrative; it needs a new section describing `ragdefender_paper`/Gates A-C before it is consistent with this document | -- |
-| `paper_latex/bigdata26_paper.tex` update | **NOT YET DONE, deliberately** -- manuscript Results section stays gated on the population-scale experiment (§7), per explicit instruction | -- |
+| `paper_latex/bigdata26_paper.tex` update | **NOT YET DONE, deliberately** -- manuscript Results section stays gated on the population-scale experiment (§9), per explicit instruction | -- |
 
 ---
 
@@ -242,15 +247,19 @@ broken" -- this is an n=8, non-prospectively-sampled population (see §7).
    must not be presented as validated for `ragdefender_paper` without a
    dedicated causal experiment on the correct population.
 3. **Stage-1 count underestimation is the leading candidate bottleneck on
-   this n=8 sample, but remains provisional.** Gate C shows 7/7 Gate-B
-   residual-poison failures are fully explained by count underestimation
-   alone (§5) -- a striking, internally consistent result -- but this
-   population is small (n=8) and was not prospectively/unbiasedly
-   selected (it derives from the legacy cluster-viz instrumented case
-   set, itself downstream of which queries had a recoverable saved
-   MiniLM matrix and text). It must be tested on an expanded, bias-free
-   population (§8) before being treated as an established property of
-   `ragdefender_paper`.
+   this n=8 sample, but remains provisional -- UPDATE: tested and
+   refined on the n=42 prospective population (§9.5).** Gate C shows 7/7
+   Gate-B residual-poison failures are fully explained by count
+   underestimation alone (§5) -- a striking, internally consistent result
+   -- but this population is small (n=8) and was not
+   prospectively/unbiasedly selected. The n=42 prospective expansion
+   (§9.4-9.5) confirms count underestimation is the COMPLETE explanation
+   at/below the structural ceiling (Regime B: 14/14 failures fully
+   resolved by count correction alone) but reveals it is only a PARTIAL
+   explanation above the ceiling (Regime C: only 4/20 failures fully
+   resolved by count correction alone; the remaining 16/20 require
+   additional Stage-2 identification correction). See the mechanism
+   decision report for the full, regime-conditioned claim.
 4. **The original legacy E1/CORAL/MMD results remain historical/
    exploratory and should not be polished for the final manuscript.**
    They were computed against `ragdefender_legacy` + MiniLM geometry, not
@@ -260,7 +269,16 @@ broken" -- this is an n=8, non-prospectively-sampled population (see §7).
 
 ---
 
-## 8. Population-expansion plan (DESIGN ONLY -- NOT EXECUTED)
+## 8. Population-expansion plan (historical design note -- superseded by §9)
+
+> **Status update:** the design below was written before execution. §9
+> records what was actually frozen/run (STEPs 3-6 of the population-expansion
+> sequence) and takes precedence over any detail here that differs (e.g. §9's
+> eligible pool is the 42-query set below, Option A, not a to-be-decided
+> sample). This section is kept for its rationale/history, not as the current
+> source of truth.
+
+
 
 **Motivation:** avoid basing mechanism conclusions (§7 item 3 in
 particular) on the current n=8 population, which was selected via the
@@ -326,3 +344,185 @@ plan merely because it existed before this decomposition.
 new retrieval, no new poisoning generation, no new query selection beyond
 this written plan, no `ragdefender_paper` run on any query outside the
 existing 8 Gate-A/B/C queries.
+
+---
+
+## 9. Stage-1 count ceiling and poison-fraction stress design
+
+This section formalizes and operationalizes §7 item 3 / §8's plan: it makes
+retrieved poison count/fraction an explicit, independent stress axis, and
+records the actual (not merely planned) prospective population and its
+regime distribution.
+
+### 9.1 Structural Stage-1 count ceiling (Eq. 3)
+
+**Claim:** `N_adv <= floor(k/2)` for the production `ragdefender_paper`
+HotpotQA Stage-1 estimator (`concentration_stage1_paper`, Eq. 3's
+mean-AND-median self-excluded concentration test), **unconditionally**, for
+any `k >= 2` and any similarity matrix.
+
+**Proof sketch (full proof: `results/diagnostics/ragdefender_count_ceiling/COUNT_CEILING_ANALYSIS.md`):**
+Because `s_tilde` is the median of the `k` values `{s_median_i}`, at most
+`floor(k/2)` of them can be strictly greater than their own median (this
+holds under BOTH the primary lower-of-two-middle median convention and the
+diagnostic average-of-two-middle convention -- same numeric ceiling either
+way, proven by a sorted-order-statistic argument). Since
+`N_adv = #{i : above_mean_i AND above_median_i} <= #{i : above_median_i}
+<= floor(k/2)` (an intersection is never larger than either operand), the
+bound follows without reference to Stella geometry, query semantics, poison
+wording, or Stage 2 at all.
+
+**Special case `k=2`:** `N_adv` is **provably always exactly 0** (strictly
+stronger than the `floor(2/2)=1` ceiling), because matrix symmetry forces
+both passages' self-excluded means to be identical, so neither can be
+*strictly* greater than their shared mean. See analysis §5 for the full
+argument; this is directly relevant to interpreting any future nominal
+HotpotQA `k=2` sanity check.
+
+**Programmatic validation:** `scripts/run_ragdefender_count_ceiling_validation.py`
+tests `k in {2, 3, 4, 5, 6, 10, 11}` across random/edge-fixture symmetric
+matrices and both median conventions -- **1414/1414 checks, 0 violations**
+(see `results/diagnostics/ragdefender_count_ceiling/synthetic_validation.csv`).
+Hand-computable edge fixtures reach the ceiling exactly for 6/7 required `k`
+values (all except `k=2`, per the special case above).
+
+**Tests:** `tests/test_ragdefender_stage1_count_ceiling.py` (17 tests,
+production convention + diagnostic-convention comparison + AND-can-only-
+reduce property + edge fixtures + `k=2` special case). **Status: COMPLETE.**
+
+### 9.2 Threat-model consequence of the ceiling
+
+Two structurally different situations, not to be conflated:
+
+- **ALL-POISON RETRIEVED CONTEXT** (`C=0`, e.g. `k=5`, poison=5, clean=0):
+  **violates** the paper's stated "at least one benign passage retrieved"
+  assumption. This is Regime D below -- a threat-model-violation stress, not
+  a within-assumption failure.
+- **MAJORITY-POISON BUT THREAT-MODEL-COMPLIANT CONTEXT** (`C>=1`, e.g.
+  `k=10`, poison=6, clean=4): still contains a benign passage, so it does
+  **not** violate the stated assumption. But if the true poison count
+  exceeds `floor(k/2)`, Eq. (3) **cannot** return the true count -- a
+  structural estimator limitation, independent of Stella geometry, query
+  semantics, poison wording, or Stage-2 quality. This is Regime C below.
+
+**Allowed wording:** "Under Eq. (3), the estimated adversarial count cannot
+exceed `floor(k/2)` under the declared median-threshold interpretation."
+**Not allowed:** "RAGDefender cannot defend majority poisoning" (Stage-2/
+system-level behavior is a separate question, analyzed independently via
+the oracle-count decomposition).
+
+### 9.3 Poison-count regimes (independent variable: M)
+
+For a retrieved context of size `k`, define:
+
+- `M` = observed retrieved poison count, `C` = observed retrieved clean
+  count (`M + C = k`), `rho = M / k`, `count_error = N_adv - M`.
+
+| Regime | Condition | Threat-model status |
+|---|---|---|
+| A -- BELOW CEILING | `M < floor(k/2)` | compliant |
+| B -- AT CEILING | `M == floor(k/2)` | compliant |
+| C -- ABOVE CEILING / MAJORITY POISON | `M > floor(k/2)` AND `C >= 1` | compliant, but Eq. (3) structurally cannot reach `M` |
+| D -- ALL POISON | `C == 0` | **violates** the stated assumption |
+
+`D` is checked first and is mutually exclusive with A/B/C (an all-poison
+context is `D` regardless of how `M` compares to the ceiling; C and D are
+never mixed).
+
+### 9.4 Prospective population (STEP 3, executed)
+
+**Eligible pool:** the 50 `target_query_ids` in
+`results/diagnostics/ml_filterrag_dataset_hotpotqa_50q/dataset_config.json`
+-- a pre-existing HotpotQA k=10/N=5 split frozen for an unrelated purpose
+(ML-FilterRAG train/test partitioning) long before this task, never touched
+by any `ragdefender_legacy`/`ragdefender_paper` outcome.
+
+**Exclusions:** the 8 Gate-A/B/C diagnostic-development queries (listed in
+`scripts/ragdefender_expanded_population_lib.py::GATE_BC_EXCLUDED_QUERY_IDS`),
+leaving **42** eligible queries.
+
+**Sampling rule:** Option A -- all 42 eligible queries included, no
+sub-sampling, no random seed (none needed). The sample was **not** selected
+by legacy/paper RAGDefender success or failure, `N_adv` outcome, Stage-2
+outcome, similarity geometry, `top_pair_pp`, or existing oracle behavior --
+none of these quantities were computed for any of these 42 queries before
+the freeze.
+
+**Text recovery (no new retrieval):** clean-passage text is looked up (not
+re-retrieved) from `datasets/hotpotqa/corpus.jsonl` by the already-retrieved
+`doc_id`; poisoned-passage text is reconstructed deterministically as
+`question + "." + adv_texts[pool_index % 5]` (matches `src/attack.py`'s
+`LM_targeted` construction), with the source query resolved from
+`pool_index // 5` into the already-computed 100-query adversarial-text pool.
+Full mechanism: `scripts/ragdefender_expanded_population_lib.py` module
+docstring.
+
+**Observed regime distribution (composition property of the already-fixed
+retrieval, not a defense outcome -- see
+`results/diagnostics/ragdefender_expanded_baseline/PROSPECTIVE_POPULATION_FREEZE.md`):**
+
+| Regime | n (of 42) |
+|---|---|
+| A_BELOW_CEILING | 0 |
+| B_AT_CEILING | 19 |
+| C_ABOVE_CEILING | 20 |
+| D_ALL_POISON | 3 |
+
+Regime A has zero representation: at `k=10`, every retrieved context in this
+attack configuration has an observed poison count `>= 5 = floor(10/2)`. This
+is reported as an honest limitation of the existing N=5-candidate attack
+configuration, not engineered around.
+
+**Artifacts:** `results/diagnostics/ragdefender_expanded_baseline/{PROSPECTIVE_POPULATION_FREEZE.md,prospective_population.csv,recovered_contexts.json}`,
+frozen strictly before any Stella/RAGDefender computation on these queries.
+**Status: COMPLETE.**
+
+### 9.5 Expanded baseline / expanded Gate-C / mechanism decision (STEPs 4-6, executed)
+
+**Expanded baseline (n=42, `ragdefender_paper` + Stella, k=10):** zero-
+residual-poison success rate **5/42 (11.9%)**; exact-count rate **5/42
+(11.9%)**; undercount rate **37/42 (88.1%)**; overcount rate **0/42**.
+Mean Stage-2 removal precision is **1.00 in every regime** -- Stage 2 never
+removes a clean passage it wasn't asked to remove; all failure is
+attributable to *how many* passages Stage 2 is asked to remove, and (in
+Regime C only) *which* ones. Full detail:
+`results/diagnostics/ragdefender_expanded_baseline/EXPANDED_BASELINE_REPORT.md`.
+
+**Expanded Gate-C oracle-count decomposition (n=42, same matrices):** of
+the 37 baseline failures, **21 (56.8%) are COUNT-LIMITED** (A),
+**16 (43.2%) are COUNT + IDENTIFICATION LIMITED** (B), and **0 are pure
+IDENTIFICATION-LIMITED** (C) -- i.e. a correct count with the unchanged
+Stage-2 procedure is NEVER, by itself, insufficient in this sample UNLESS
+the count itself is above the structural ceiling. Regime breakdown is the
+decisive cut: **B_AT_CEILING: 14/14 failures (100%) fully fixed by the
+oracle count alone**; **D_ALL_POISON: 3/3 (100%)** fixed (threat-model
+violation stress, interpret separately); **C_ABOVE_CEILING: only 4/20
+(20%)** fixed -- the remaining 16/20 still show residual poison and/or
+extra clean removal even when Stage 2 is handed the true (necessarily
+above-ceiling) count. Full detail:
+`results/diagnostics/ragdefender_expanded_gate_c/EXPANDED_GATE_C_REPORT.md`.
+
+**Mechanism decision (STEP 6):** **DECISION C -- two distinct failure
+modes, separated by poison-count regime** (not the same "Decision A" story
+uniformly): at/below the ceiling, Stage-1 count estimation is the complete
+explanation of failure (Stage 2 is always accurate given the right count);
+above the ceiling, count correction is necessary but insufficient for 80%
+of failures, and a genuine, previously-unobserved Stage-2
+identification-capacity cost co-occurs. Recommends TWO follow-up oracles
+(Stage-1 count-sensitivity near the ceiling boundary, and a separate
+Stage-2 above-ceiling identification-capacity oracle), neither implemented
+here. Full detail, caveats, and exact manuscript-claim boundary:
+`results/diagnostics/ragdefender_mechanism_decision/RAGDEFENDER_MECHANISM_DECISION_REPORT.md`.
+
+### 9.6 Nominal HotpotQA k=2 sanity check
+
+**Not executed in this session** -- would require a fresh retrieval pass at
+`k=2` (no existing saved `k=2` HotpotQA retrieval/poisoning artifacts were
+found for this population), and new retrieval was not authorized for this
+task. Recorded as a **planned follow-up**. Structural implication to keep in
+mind when it is eventually run: `floor(2/2)=1`, and per §9.1's special case,
+`N_adv` is provably always exactly `0` at `k=2` regardless of similarity
+geometry -- so Eq. (3) can never flag a passage as adversarial under the
+nominal paper `k=2` setting. Its results, if/when produced, must be kept in
+a separate output directory and never aggregated with the k=10 stress-regime
+results (different retrieval regime, different `N_pairs` scale).
