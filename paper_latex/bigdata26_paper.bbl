@@ -43,6 +43,19 @@ G.~Izacard, M.~Caron, L.~Hosseini, S.~Riedel, P.~Bojanowski, A.~Joulin, and
   E.~Grave, ``Unsupervised dense information retrieval with contrastive
   learning,'' \emph{Transactions on Machine Learning Research}, 2022.
 
+\bibitem{su2025aggd}
+J.~Su, P.~Nakov, and C.~Cardie, ``Corpus poisoning via approximate greedy
+  gradient descent,'' in \emph{Findings of the Association for Computational
+  Linguistics: ACL 2025}.\hskip 1em plus 0.5em minus 0.4em\relax Vienna,
+  Austria: Association for Computational Linguistics, 2025, pp. 4274--4294.
+
+\bibitem{li2025continuous}
+Y.~Li, P.~Eustratiadis, S.~Lupart, and E.~Kanoulas, ``Unsupervised corpus
+  poisoning attacks in continuous space for dense retrieval,'' in \emph{Proc.
+  48th International ACM SIGIR Conference on Research and Development in
+  Information Retrieval (SIGIR)}.\hskip 1em plus 0.5em minus 0.4em\relax Padua,
+  Italy: ACM, 2025.
+
 \bibitem{kim2025ragdefender}
 S.~Kim \emph{et~al.}, ``Rescuing the unpoisoned: Efficient defense against
   knowledge corruption attacks on {RAG} systems,'' in \emph{Proc. Annual
@@ -58,6 +71,26 @@ K.~Edemacu \emph{et~al.}, ``Defending against knowledge poisoning attacks
 C.~Xiang, T.~Wu, Z.~Zhong, D.~Wagner, D.~Chen, and P.~Mittal, ``Certifiably
   robust {RAG} against retrieval corruption,'' in \emph{arXiv preprint}, 2024,
   vERIFY final venue.
+
+\bibitem{sun2016coral}
+B.~Sun, J.~Feng, and K.~Saenko, ``Return of frustratingly easy domain
+  adaptation,'' in \emph{Proc. AAAI Conference on Artificial Intelligence},
+  2016.
+
+\bibitem{gretton2012mmd}
+A.~Gretton, K.~M. Borgwardt, M.~J. Rasch, B.~Sch{\"o}lkopf, and A.~Smola, ``A
+  kernel two-sample test,'' \emph{Journal of Machine Learning Research},
+  vol.~13, 2012.
+
+\bibitem{chhabra2020clustering}
+A.~Chhabra, A.~Roy, and P.~Mohapatra, ``Suspicion-free adversarial attacks on
+  clustering algorithms,'' in \emph{Proc. AAAI Conference on Artificial
+  Intelligence}, vol.~34, no.~4, 2020, pp. 3625--3632.
+
+\bibitem{cina2022clustering}
+A.~E. Cin{\`a}, A.~Torcinovich, and M.~Pelillo, ``A black-box adversarial
+  attack for poisoning clustering,'' \emph{Pattern Recognition}, vol. 122, p.
+  108306, 2022.
 
 \bibitem{jin2020textfooler}
 D.~Jin, Z.~Jin, J.~T. Zhou, and P.~Szolovits, ``Is {BERT} really robust? a
@@ -75,16 +108,6 @@ J.~X. Morris, E.~Lifland, J.~Y. Yoo, J.~Grigsby, D.~Jin, and Y.~Qi,
   ``{TextAttack}: A framework for adversarial attacks, data augmentation, and
   adversarial training in {NLP},'' in \emph{Proc. EMNLP: System
   Demonstrations}, 2020.
-
-\bibitem{sun2016coral}
-B.~Sun, J.~Feng, and K.~Saenko, ``Return of frustratingly easy domain
-  adaptation,'' in \emph{Proc. AAAI Conference on Artificial Intelligence},
-  2016.
-
-\bibitem{gretton2012mmd}
-A.~Gretton, K.~M. Borgwardt, M.~J. Rasch, B.~Sch{\"o}lkopf, and A.~Smola, ``A
-  kernel two-sample test,'' \emph{Journal of Machine Learning Research},
-  vol.~13, 2012.
 
 \bibitem{yang2018hotpotqa}
 Z.~Yang, P.~Qi, S.~Zhang, Y.~Bengio, W.~W. Cohen, R.~Salakhutdinov, and C.~D.

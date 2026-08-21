@@ -770,7 +770,8 @@ matrix-space oracle**) but this does not imply a valid cosine Gram matrix
 (needs PSD, checked via `eigvalsh`; **LEVEL 2: abstract unit-vector-
 compatible**) — and PSD validity does **not** imply Stella-embedding- or
 text-realizability (LEVELS 3/4, not established by this or any prior
-pass). In this population, the alpha-minimal winner happens to already be
+pass). In this population, the earliest-detected successful alpha (under
+the specified grid-and-refinement search) winner happens to already be
 PSD-valid in all 14 queries, so Levels 1 and 2 coincide for the winning
 candidates specifically (not for the full achieving set: 8/80 non-winning
 achieving candidates are not PSD-valid).

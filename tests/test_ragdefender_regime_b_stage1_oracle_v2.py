@@ -75,7 +75,7 @@ class TestSearchRegressionCases(unittest.TestCase):
         self.assertFalse(result.endpoint_successful)
         self.assertGreaterEqual(result.earliest_success_alpha, 0.2 - 1e-3)
         self.assertLess(result.earliest_success_alpha, 0.4)
-        self.assertTrue(lambda a=result.earliest_success_alpha: 0.2 <= a < 0.4)
+        self.assertTrue(0.2 <= result.earliest_success_alpha < 0.4)
 
     def test_case_c_two_success_windows_chooses_first(self):
         def predicate(a):
@@ -339,7 +339,7 @@ class TestCandidateSelectionV2(unittest.TestCase):
             self.assertEqual(w1.alpha, w2.alpha)
 
     def test_best_psd_valid_winner_selected_independently(self):
-        """When the alpha-minimal winner is not PSD, the PSD-required
+        """When the earliest-detected-alpha winner is not PSD, the PSD-required
         selection must pick a DIFFERENT (documented) candidate, never
         silently reuse the non-PSD one."""
         m = _symmetric_matrix(10, seed=99)
