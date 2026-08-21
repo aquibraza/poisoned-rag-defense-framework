@@ -702,3 +702,81 @@ pass; 1 gated live-Stella smoke test also passes with
 bridge; historical package-version provenance for STEP 4 remains,
 and is expected to remain, unresolved absent a new contemporaneous
 artifact).
+
+---
+
+## 10. Regime-B Stage-1 boundary-sensitivity oracle (mechanism study)
+
+**Scope note:** purely an OFFLINE matrix/statistic analysis over the 19
+already-saved Regime-B (`k=10`, `M=5`) Stella similarity matrices from
+`results/diagnostics/ragdefender_expanded_baseline/`. No retrieval, no
+Stella re-encoding, no text mutation, no generation, no E1/CORAL/MMD, no
+LLM/API call was run for either pass below. Scripts:
+`scripts/ragdefender_regime_b_stage1_oracle_lib.py`,
+`scripts/run_ragdefender_regime_b_stage1_oracle.py` (V1),
+`scripts/run_ragdefender_regime_b_stage1_oracle_v2.py` (V2 correction).
+Full reports:
+`results/diagnostics/ragdefender_regime_b_stage1_oracle/REGIME_B_STAGE1_ORACLE_REPORT.md`
+(V1, superseded for Phase 4/5) and
+`REGIME_B_STAGE1_ORACLE_V2_REPORT.md` (V2, current).
+
+### SUPPORTED — Phase 1–3 (unchanged by the V2 correction pass)
+
+- Population: **n=19** Regime-B queries (5 successes, 14 failures);
+  every failure has `N_adv=4`, every success `N_adv=5`.
+- Boundary decomposition of the 14 failures: **11/14 MEDIAN-LIMITED**
+  (`n_above_median<5`), **3/14 MEAN-GATED** (`n_above_median=5` but the
+  mean test excludes one passage), **0/14 BOTH-LIMITED**.
+- Exact `s_median` rank-5/rank-6 boundary tie (`median_gap==0.0`) in all
+  11 MEDIAN-LIMITED failures; all 5 successes have `median_gap>0`
+  (min observed positive success gap ≈0.0044).
+- Statistic-space (idealized, not matrix-constrained) oracle: 14/14
+  failures have a route to `N_adv=5` via a single-passage statistic
+  perturbation (12 median-sensitive, 2 mean-sensitive).
+- **V2 addition:** the mutual-median-match explanation is now explicitly
+  verified, not just illustrated — **11/11** MEDIAN-LIMITED failures have
+  their exact `s_median` tie caused by a provable mutual-median-match pair
+  (`j in median_provider_set(i)` AND `i in median_provider_set(j)`, using
+  full provider SETS to correctly handle within-row value ties). Claim:
+  "In all 11 median-limited failures, the boundary tie is explained by at
+  least one mutual-median provider relationship in the symmetric
+  similarity matrix."
+
+### V2 PHASE 4–5 — corrected matrix-space reachability (supersedes V1)
+
+V1's shared alpha-search helper (`_monotonic_or_grid_search`) had a
+false-negative bug: it decided reachability from the grid **endpoint**
+only, silently discarding any transient success (predicate `True`
+somewhere in the interior, `False` again at the endpoint). V2 rewrites
+this to scan the full path, detect every contiguous success window, and
+target the earliest one with deterministic local refinement
+(`ALPHA_TOL=1e-6`), never assuming monotonicity.
+
+| | V1 (superseded) | **V2 (corrected)** |
+|---|---|---|
+| any boost success | 0/14 | **14/14** (all transient) |
+| any decrease success | 9/14 | **11/14** |
+| reachable either mode | 9/14 | **14/14** |
+| unreachable | 5/14 | **0/14** |
+| winning-path mode split | 0 boost / 9 decrease | **12 boost / 2 decrease** |
+| winning paths non-monotonic | "3/9" (provisional) | **12/14** |
+| PSD-valid @1e-8 among reachable candidates | not measured | **72/80**; **14/14 winners** |
+| Phase-5: count-fix+successful / degraded | 7/9 / 2/9 | **14/14 / 0/14** |
+
+Terminology correction: V1's "realizable matrix oracle" wording is
+withdrawn. Perturbations are symmetric, diagonal-preserving, and
+`[-1,1]`-clipped by construction (**LEVEL 1: symmetric bounded
+matrix-space oracle**) but this does not imply a valid cosine Gram matrix
+(needs PSD, checked via `eigvalsh`; **LEVEL 2: abstract unit-vector-
+compatible**) — and PSD validity does **not** imply Stella-embedding- or
+text-realizability (LEVELS 3/4, not established by this or any prior
+pass). In this population, the alpha-minimal winner happens to already be
+PSD-valid in all 14 queries, so Levels 1 and 2 coincide for the winning
+candidates specifically (not for the full achieving set: 8/80 non-winning
+achieving candidates are not PSD-valid).
+
+**Regime-B decision: A — sufficiently characterized.** The exact-tie
+mechanism (mutual-median-match, 11/11) and mean-gate mechanism (3/3) are
+both mechanistically precise; the corrected matrix-space analysis gives a
+stable, exhaustive picture. Recommend proceeding to a Regime-C Stage-2
+identification-capacity study (not run in this task).

@@ -105,21 +105,34 @@ def outcome(row: Dict[str, str]) -> str:
     return ASR if truthy(row.get("strict_asr_success")) else DEFENDED
 
 
+#: Full reading label -> compact form for the IEEE-width LaTeX table only. The
+#: CSV and notes keep the full text; only the typeset table is space-limited.
+SHORT_READING = {
+    "Poison consensus failure": "Poison consensus",
+    "Abstention under contested votes": "Abstain (contested)",
+    "Aggregation defends filter-evasion": "Defends evasion",
+    "All filters already defend": "Filters defend",
+}
+
+
 def interpret(kw: str, filters: Dict[str, str]) -> str:
     """Assign each case one of the pre-agreed reading labels.
 
     The rule is fixed and applied uniformly rather than case by case: an
-    abstention is an abstention; a RobustRAG-KW hit is a total failure when no
-    filter survived either, and a consensus failure when some filter did survive
-    (aggregation lost to poison that a passage filter had caught); a clean
-    defense is only notable when some filter failed.
+    abstention is an abstention; a clean RobustRAG-KW defense is only notable
+    when some filter failed. Every RobustRAG-KW ASR hit is labelled *Poison
+    consensus failure* regardless of whether the passage filters also failed --
+    the appendix table's `self_query_poison_isolated_asr_hits` is 5/5 for both
+    ASR cases in the published scale-up, so the mechanism is the same either
+    way: the isolated calls unanimously voted for the poisoned answer. Whether
+    a passage filter separately caught that poison is a fact about the filter,
+    not about why RobustRAG-KW failed, so it does not change this label.
     """
     failed = [name for name, label in filters.items() if label == ASR]
     if kw == ABSTAINED:
         return "Abstention under contested votes"
     if kw == ASR:
-        return ("Filter failure not fixed" if len(failed) == len(filters)
-                else "Poison consensus failure")
+        return "Poison consensus failure"
     return ("All filters already defend" if not failed
             else "Aggregation defends filter-evasion")
 
@@ -236,7 +249,7 @@ def latex_escape(text: str) -> str:
 
 
 def build_latex(rows: List[Dict[str, str]]) -> str:
-    header = ["Family", "Query", "Self-poison", "Passage filters",
+    header = ["Family", "Query", "Self/All poison", "Passage filters",
               "RRKW", "$s_{\\mathrm{wrong}}$", "$s_{\\mathrm{gold}}$", "Reading"]
     # table*: eight columns, two of them prose, do not fit an IEEE column.
     L = [r"% Requires \usepackage{booktabs}.",
@@ -246,7 +259,9 @@ def build_latex(rows: List[Dict[str, str]]) -> str:
          r"\begin{tabular}{llclcccl}", r"\toprule",
          " & ".join(header) + r" \\", r"\midrule"]
     for r in rows:
-        L.append(" & ".join(latex_escape(str(r[f])) for f in MAIN_FIELDS) + r" \\")
+        cells = [SHORT_READING.get(r[f], r[f]) if f == "robustrag_kw_interpretation" else r[f]
+                 for f in MAIN_FIELDS]
+        L.append(" & ".join(latex_escape(str(c)) for c in cells) + r" \\")
     L += [r"\bottomrule", r"\end{tabular}",
           r"\begin{minipage}{\textwidth}", r"\vspace{2pt}", r"\scriptsize",
           latex_escape(TABLE_NOTE), r"\end{minipage}", r"\end{table*}", ""]
@@ -269,7 +284,7 @@ def build_notes(main_rows, appendix_rows, missing, scaleup_dir) -> str:
          "| Table column | Artifact | Field |",
          "| --- | --- | --- |",
          f"| Mutation family, query id | `{GENERATION_RESULTS}` | `family`, `query_id` |",
-         f"| Self-query poison retrieved | `{GENERATION_RESULTS}` | `n_self_query_poison` / `n_retrieved_poison` |",
+         f"| Self/All poison retrieved | `{GENERATION_RESULTS}` | `n_self_query_poison` / `n_retrieved_poison` |",
          f"| Passage-filter outcome | `{VS_EXISTING}` | `strict_asr_success` per `defense_name` |",
          f"| RobustRAG-KW outcome | `{VS_EXISTING}` | `strict_asr_success`, `abstained` (`defense_name=robustrag_kw`) |",
          f"| Wrong/correct vote share | `{GENERATION_RESULTS}` | `wrong_answer_vote_share`, `correct_answer_vote_share` |",
@@ -292,33 +307,49 @@ def build_notes(main_rows, appendix_rows, missing, scaleup_dir) -> str:
          "legibility. They are labels, not data. `query_id` is carried in the appendix "
          "table so every row stays traceable.",
          "3. **Reading labels.** Assigned by a fixed rule, not case by case: an "
-         "abstention gives *Abstention under contested votes*; a RobustRAG-KW ASR hit "
-         "gives *Filter failure not fixed* if every filter also failed and *Poison "
-         "consensus failure* if at least one filter held; a clean RobustRAG-KW defense "
-         "gives *Aggregation defends filter-evasion* if some filter failed and *All "
-         "filters already defend* otherwise.",
+         "abstention gives *Abstention under contested votes*; every RobustRAG-KW ASR "
+         "hit gives *Poison consensus failure*, regardless of whether a passage filter "
+         "also failed on that case -- both ASR cases have `self_query_poison_isolated_"
+         "asr_hits` = 5/5 in the appendix table, i.e. every isolated call independently "
+         "voted for the poisoned answer, which is what the label describes; a clean "
+         "RobustRAG-KW defense gives *Aggregation defends filter-evasion* if some filter "
+         "failed and *All filters already defend* otherwise. The LaTeX table renders "
+         "these in a shortened form for width (`Poison consensus`, `Abstain "
+         "(contested)`, `Defends evasion`, `Filters defend`); the CSVs and this file "
+         "always use the full label.",
+         "4. **`Self/All poison` notation (`a/b`).** `a` is `n_self_query_poison`, the "
+         "mutated passages written for this exact query; `b` is `n_retrieved_poison`, "
+         "all poisoned passages retrieved for the case, including any poison originally "
+         "targeting a different query in the shared adversarial pool. `5/5` means every "
+         "retrieved poison passage targets this query; `5/6` and `5/7` mean the case "
+         "additionally retrieved 1 or 2 cross-query poison passages that also ranked in "
+         "the top-10 -- those extra passages are the ones counted in the appendix "
+         "table's `cross_query_poison_gold_matches` column.",
          "",
          "## What the table supports", "",
          f"- RobustRAG-KW outcomes across the 9 cases: " +
          ", ".join(f"{k} {v}" for k, v in sorted(kw_counts.items())) + ".",
          f"- Readings: " + "; ".join(f"{k} ({v})" for k, v in sorted(readings.items())) + ".",
-         "- Both ASR cases are poison-consensus failures mechanically: all 5 self-query "
-         "poison passages produced the target in isolation "
-         "(`self_query_poison_isolated_asr_hits` = 5/5 in the appendix table). The "
-         "reading labels split them only by whether any passage filter also held, so "
-         "the plural in the claim below is carried by both.",
+         "- Both ASR cases carry the *Poison consensus failure* reading for the same "
+         "mechanical reason: all 5 self-query poison passages produced the target in "
+         "isolation (`self_query_poison_isolated_asr_hits` = 5/5 in the appendix table "
+         "for each). One of them (Gibson/Zurracapote gin) also happens to be a case "
+         "where every passage filter failed too, and the other (Menges/Avakian) is one "
+         "where a filter held; the reading label does not distinguish these, since both "
+         "are RobustRAG-KW's own isolated calls unanimously voting for poison -- the "
+         "plural in the claim below is carried by both.",
          f"- On **{n_filter_failed_kw_held} of 9** cases at least one passage filter "
-         "produced the attacker's answer while RobustRAG-KW did not. This is the "
-         "\"defended 3\" figure in the scale-up report, and it counts *the target was "
-         "not produced*: 1 of the 3 is a clean defense and 2 are abstentions. State it "
-         "that way in prose, since the table distinguishes `Def.` from `Abs.` and a "
-         "reader who counts only `Def.` cells will find 1, not 3.",
+         "produced the attacker's answer while RobustRAG-KW did not. Report this as "
+         "RobustRAG-KW *did not produce the attacker answer in 3* shortlisted cases, "
+         "not as \"defended 3\": 1 of the 3 is a clean defense and 2 are abstentions, "
+         "and the table distinguishes `Def.` from `Abs.` so a reader who counts only "
+         "`Def.` cells will find 1, not 3.",
          "",
          "Supported claim:", "",
-         "> RobustRAG-KW provides an orthogonal generation-time defense profile: it "
-         "defended 3 shortlisted cases where at least one passage filter produced the "
-         "attacker answer, failed under poison-consensus cases, and frequently abstained "
-         "under contested votes.", "",
+         "> RobustRAG-KW provides an orthogonal generation-time defense profile: it did "
+         "not produce the attacker answer in 3 shortlisted cases where at least one "
+         "passage filter produced the attacker answer, failed under poison-consensus "
+         "cases, and frequently abstained under contested votes.", "",
          "## Coverage", "",
          f"- Main table: {len(main_rows)} rows (one per shortlisted case).",
          f"- Appendix table: {len(appendix_rows)} rows.",

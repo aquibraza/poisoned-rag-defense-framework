@@ -250,64 +250,159 @@ def minimal_mean_only_delta(s_mean: np.ndarray, i: int) -> Optional[float]:
     return float(delta)
 
 
+ALPHA_TOL = 1e-6  # local-refinement stopping resolution for the grid search below
+
+
+@dataclass
+class GridSearchResult:
+    """Full result of scanning a Boolean predicate over `[lo, hi]` -- see
+    `_monotonic_or_grid_search` docstring. Fixes the V1 bug where only the
+    grid ENDPOINT was checked for reachability (a false negative whenever
+    the predicate is transiently True somewhere in the interior but False
+    at `hi`)."""
+
+    reachable: bool
+    earliest_success_alpha: Optional[float]  # refined estimate, or None if unreachable
+    is_monotonic: bool  # True iff no True->False transition occurs anywhere on the coarse grid
+    n_false_to_true_transitions: int
+    n_true_to_false_transitions: int
+    n_success_windows: int
+    endpoint_successful: bool
+    success_windows: List[Tuple[int, int]] = field(default_factory=list)  # coarse-grid index pairs, inclusive
+    coarse_path: List[Tuple[float, bool]] = field(default_factory=list, repr=False)
+    verified: bool = False  # predicate(earliest_success_alpha) re-checked True post-refinement
+    just_below_alpha: Optional[float] = None
+    just_below_successful: Optional[bool] = None
+
+
+def _refine_earliest_success(
+    predicate: Callable[[float], bool],
+    bracket_lo: float,
+    bracket_hi: float,
+    refine_levels: int = 40,
+    alpha_tol: float = ALPHA_TOL,
+    dense_points: int = 25,
+) -> float:
+    """Deterministic local refinement of the EARLIEST false->true crossing
+    inside `[bracket_lo, bracket_hi]` (where `predicate(bracket_hi)` is
+    already known True). Does NOT assume monotonicity even locally --
+    each refinement level re-scans a dense grid and only narrows to the
+    immediately preceding false->true subinterval of THAT scan, exactly as
+    specified (Phase 4, STEP 1A)."""
+    lo, hi = float(bracket_lo), float(bracket_hi)
+    best = hi
+    for _level in range(refine_levels):
+        if (hi - lo) <= alpha_tol:
+            break
+        dense_grid = np.linspace(lo, hi, dense_points)
+        dense_bools = [bool(predicate(float(d))) for d in dense_grid]
+        true_idx = next((i for i, v in enumerate(dense_bools) if v), None)
+        if true_idx is None:
+            # Should not happen since `hi` (the last dense point) is True by
+            # construction of the bracket -- defensive fallback only.
+            break
+        best = float(dense_grid[true_idx])
+        if true_idx == 0:
+            hi = best
+            break
+        lo, hi = float(dense_grid[true_idx - 1]), best
+    return best
+
+
 def _monotonic_or_grid_search(
     predicate: Callable[[float], bool],
     lo: float = 0.0,
     hi: float = 4.0,
     coarse_steps: int = 400,
-    bisection_iters: int = 50,
-) -> Tuple[Optional[float], bool, List[Tuple[float, bool]]]:
-    """Generic minimal-delta search for a predicate assumed non-decreasing
-    (False, ..., False, True, ..., True) as delta increases from `lo`.
+    refine_levels: int = 40,
+    alpha_tol: float = ALPHA_TOL,
+) -> GridSearchResult:
+    """Full-path Boolean grid search over `[lo, hi]` -- CORRECTED version.
 
-    Returns (minimal_delta_or_None, is_monotonic, coarse_path). Verifies
-    monotonicity on the coarse grid; if violated, falls back to the FIRST
-    grid point where the predicate is True (deterministic, no bisection
-    assumption), per the task's "deterministic bounded grid + local
-    refinement" fallback instruction.
+    V1 BUG (fixed here): the previous implementation checked ONLY
+    `path[-1][1]` (the grid endpoint) to decide reachability, incorrectly
+    returning "unreachable" whenever the predicate was transiently True in
+    the interior of `[lo, hi]` but False again at `hi`. This function
+    instead scans the ENTIRE coarse grid for ANY True value.
+
+    Returns a `GridSearchResult`:
+    - `reachable` is True iff the predicate is True at ANY sampled point.
+    - `is_monotonic` (non-decreasing) iff there is zero True->False
+      transition anywhere on the coarse grid -- i.e. once True, the
+      predicate never reverts to False for the remainder of `[lo, hi]`.
+    - `earliest_success_alpha` is the refined (not exactly-minimal, see
+      `_refine_earliest_success`) alpha at the START of the FIRST
+      contiguous successful window, regardless of what happens at later
+      alpha (including if the predicate later reverts to False).
     """
     grid = np.linspace(lo, hi, coarse_steps + 1)
     path = [(float(d), bool(predicate(d))) for d in grid]
+    bools = [v for _, v in path]
 
-    if not path[-1][1]:
-        return None, True, path  # not achievable within [lo, hi]
+    success_indices = [i for i, v in enumerate(bools) if v]
+    if not success_indices:
+        return GridSearchResult(
+            reachable=False,
+            earliest_success_alpha=None,
+            is_monotonic=True,  # vacuously monotonic: no True ever appears
+            n_false_to_true_transitions=0,
+            n_true_to_false_transitions=0,
+            n_success_windows=0,
+            endpoint_successful=False,
+            success_windows=[],
+            coarse_path=path,
+            verified=False,
+        )
 
-    # Monotonicity check: no True followed later by a False.
-    seen_true = False
-    is_monotonic = True
-    first_true_idx = None
-    for idx, (_d, val) in enumerate(path):
-        if val:
-            if first_true_idx is None:
-                first_true_idx = idx
-            seen_true = True
-        elif seen_true and not val:
-            is_monotonic = False
+    n_f2t = 0
+    n_t2f = 0
+    windows: List[List[int]] = []
+    for i in range(len(bools)):
+        prev = bools[i - 1] if i > 0 else False
+        cur = bools[i]
+        if (not prev) and cur:
+            n_f2t += 1
+            windows.append([i, i])
+        elif prev and (not cur):
+            n_t2f += 1
+            windows[-1][1] = i - 1
+        elif cur:
+            # Still inside the currently-open window -- extend its end index
+            # as we go, so a window that runs all the way to the end of the
+            # grid is correctly closed at the LAST True index, not left at
+            # its start index.
+            windows[-1][1] = i
 
-    if is_monotonic:
-        lo_b, hi_b = path[first_true_idx - 1][0] if first_true_idx > 0 else lo, path[first_true_idx][0]
-        for _ in range(bisection_iters):
-            mid = (lo_b + hi_b) / 2.0
-            if predicate(mid):
-                hi_b = mid
-            else:
-                lo_b = mid
-        return float(hi_b), True, path
+    is_monotonic = n_t2f == 0
+    endpoint_successful = bools[-1]
+    first_window = windows[0]
 
-    # Non-monotonic: deterministic grid fallback -- first True on the coarse
-    # grid, then a local finer refinement immediately below it (never
-    # assuming monotonicity holds in that refinement window either; we just
-    # take the smallest delta found in the finer window that is True and
-    # immediately preceded by a False in that same finer scan, else keep
-    # the coarse value).
-    coarse_first_true = path[first_true_idx][0]
-    coarse_prev = path[first_true_idx - 1][0] if first_true_idx > 0 else lo
-    fine_grid = np.linspace(coarse_prev, coarse_first_true, 200)
-    best = coarse_first_true
-    for d in fine_grid:
-        if predicate(float(d)) and float(d) < best:
-            best = float(d)
-    return float(best), False, path
+    bracket_lo = path[first_window[0] - 1][0] if first_window[0] > 0 else lo
+    bracket_hi = path[first_window[0]][0]
+    earliest_alpha = _refine_earliest_success(predicate, bracket_lo, bracket_hi, refine_levels, alpha_tol)
+
+    verified = bool(predicate(earliest_alpha))
+    just_below = None
+    just_below_successful = None
+    below_candidate = np.nextafter(earliest_alpha, -np.inf)
+    if below_candidate >= lo:
+        just_below = float(below_candidate)
+        just_below_successful = bool(predicate(just_below))
+
+    return GridSearchResult(
+        reachable=True,
+        earliest_success_alpha=earliest_alpha,
+        is_monotonic=is_monotonic,
+        n_false_to_true_transitions=n_f2t,
+        n_true_to_false_transitions=n_t2f,
+        n_success_windows=len(windows),
+        endpoint_successful=endpoint_successful,
+        success_windows=[(w[0], w[1]) for w in windows],
+        coarse_path=path,
+        verified=verified,
+        just_below_alpha=just_below,
+        just_below_successful=just_below_successful,
+    )
 
 
 def minimal_median_only_delta(
@@ -327,10 +422,10 @@ def minimal_median_only_delta(
         new_tilde = ri._torch_style_median_1d(perturbed)  # noqa: SLF001
         return perturbed[i] > new_tilde
 
-    delta, is_monotonic, _path = _monotonic_or_grid_search(predicate, lo=0.0, hi=hi)
-    if delta is None:
-        return None, is_monotonic
-    return delta + EPS, is_monotonic
+    result = _monotonic_or_grid_search(predicate, lo=0.0, hi=hi)
+    if not result.reachable:
+        return None, result.is_monotonic
+    return result.earliest_success_alpha + EPS, result.is_monotonic
 
 
 @dataclass
@@ -469,7 +564,19 @@ def best_statistic_oracle_result(results: List[StatisticOracleResult]) -> Option
 
 
 # ---------------------------------------------------------------------------
-# PHASE 4 -- symmetric similarity-matrix oracle
+# PHASE 4 -- symmetric bounded matrix-space oracle
+#
+# TERMINOLOGY (V2 correction): this phase explores perturbations that are
+# symmetric, diagonal-preserving, and clipped to [-1,1] -- properties that
+# are NECESSARY but NOT SUFFICIENT for a matrix to be a valid cosine Gram
+# matrix of any embedding (it must also be positive semi-definite -- see
+# `gram_matrix_validity` below). V1 of this report used the word
+# "realizable" for this perturbation family; that wording is WITHDRAWN.
+# Use "symmetric bounded matrix-space oracle" (LEVEL 1) or, for the PSD-
+# valid subset, "abstract unit-vector-compatible matrix perturbation"
+# (LEVEL 2). NEVER "embedding-realizable", "Stella-realizable", or
+# "text-realizable" (LEVELS 3/4) -- those require a separate experiment
+# this module does not perform.
 # ---------------------------------------------------------------------------
 
 def perturb_boost(matrix: np.ndarray, i: int, alpha: float) -> np.ndarray:
@@ -497,14 +604,53 @@ def n_adv_after_matrix_perturbation(matrix: np.ndarray) -> int:
     return ri.concentration_stage1_paper(matrix).n_adv_estimated
 
 
+def gram_matrix_validity(matrix: np.ndarray, sym_atol: float = 1e-8, diag_atol: float = 1e-6) -> dict:
+    """PSD / Gram-matrix validity diagnostics (Phase 4, STEP 4).
+
+    Symmetric + diagonal-preserving + [-1,1]-bounded (guaranteed by
+    `perturb_boost`/`perturb_decrease`) does NOT by itself imply `matrix`
+    is a valid cosine Gram matrix of any set of unit vectors -- it must
+    ALSO be positive semi-definite. This function checks that directly via
+    `eigvalsh`, and separately confirms the symmetry/diagonal properties
+    (belt-and-suspenders, since the perturbation functions already
+    guarantee them by construction).
+    """
+    matrix = np.asarray(matrix, dtype=np.float64)
+    is_symmetric = bool(np.allclose(matrix, matrix.T, atol=sym_atol))
+    diag_near_one = bool(np.allclose(np.diag(matrix), 1.0, atol=diag_atol))
+    # Symmetrize defensively before eigvalsh (which assumes symmetry and
+    # only reads the lower triangle by default) -- does not change the
+    # result for an already-symmetric input, but protects against any
+    # sub-tolerance asymmetry from floating-point roundoff.
+    symmetrized = (matrix + matrix.T) / 2.0
+    eigenvalues = np.linalg.eigvalsh(symmetrized)
+    min_eigenvalue = float(eigenvalues.min())
+    n_negative_eigenvalues = int(np.sum(eigenvalues < -1e-12))
+    return {
+        "is_symmetric": is_symmetric,
+        "diag_near_one": diag_near_one,
+        "min_eigenvalue": min_eigenvalue,
+        "n_negative_eigenvalues": n_negative_eigenvalues,
+        "psd_valid_tol_1e8": min_eigenvalue >= -1e-8,
+        "psd_valid_tol_1e6": min_eigenvalue >= -1e-6,
+    }
+
+
 @dataclass
 class MatrixOracleResult:
     candidate_index: int
     mode: str  # "boost" or "decrease"
-    alpha: Optional[float]
+    alpha: Optional[float]  # earliest-detected successful alpha (refined), or None if unreachable
     is_monotonic: bool
+    reachable: bool
+    endpoint_successful: bool
+    n_false_to_true_transitions: int
+    n_true_to_false_transitions: int
+    n_success_windows: int
     n_adv_path: List[Tuple[float, int]]
     achieved_n_adv: Optional[int]
+    verified: bool
+    gram: Optional[dict] = None  # PSD/Gram validity of the winning perturbed matrix, if alpha is not None
     perturbed_matrix: Optional[np.ndarray] = field(default=None, repr=False)
 
 
@@ -517,37 +663,44 @@ def matrix_oracle_for_candidate(
     coarse_steps: int = 200,
 ) -> MatrixOracleResult:
     """Phase 4A/4B for ONE candidate passage `i`. `mode='boost'` raises
-    `S_ij` for all `j != i`; `mode='decrease'` lowers it. Does NOT assume
-    monotonicity -- verifies it empirically via a coarse grid over the full
-    `N_adv(alpha)` path, falling back to a deterministic grid+local-refine
-    if non-monotonic."""
+    `S_ij` for all `j != i`; `mode='decrease'` lowers it. Uses the
+    CORRECTED `_monotonic_or_grid_search` (full-path scan -- see its
+    docstring for the V1 bug this fixes), so a transient success whose
+    grid endpoint is False is still detected and returned, not missed."""
     perturb_fn = perturb_boost if mode == "boost" else perturb_decrease
 
     def predicate(alpha: float) -> bool:
         return n_adv_after_matrix_perturbation(perturb_fn(matrix, i, alpha)) >= target_n_adv
 
-    delta, is_monotonic, path_bool = _monotonic_or_grid_search(
-        predicate, lo=0.0, hi=alpha_max, coarse_steps=coarse_steps
-    )
+    search = _monotonic_or_grid_search(predicate, lo=0.0, hi=alpha_max, coarse_steps=coarse_steps)
     # Re-derive the full N_adv(alpha) integer path (not just the boolean
     # predicate) at the same grid resolution for non-monotonicity reporting.
     n_adv_path = [
-        (d, n_adv_after_matrix_perturbation(perturb_fn(matrix, i, d))) for d, _ in path_bool
+        (d, n_adv_after_matrix_perturbation(perturb_fn(matrix, i, d))) for d, _ in search.coarse_path
     ]
 
     achieved = None
     perturbed_matrix = None
-    if delta is not None:
-        perturbed_matrix = perturb_fn(matrix, i, delta)
+    gram = None
+    if search.reachable:
+        perturbed_matrix = perturb_fn(matrix, i, search.earliest_success_alpha)
         achieved = n_adv_after_matrix_perturbation(perturbed_matrix)
+        gram = gram_matrix_validity(perturbed_matrix)
 
     return MatrixOracleResult(
         candidate_index=i,
         mode=mode,
-        alpha=delta,
-        is_monotonic=is_monotonic,
+        alpha=search.earliest_success_alpha,
+        is_monotonic=search.is_monotonic,
+        reachable=search.reachable,
+        endpoint_successful=search.endpoint_successful,
+        n_false_to_true_transitions=search.n_false_to_true_transitions,
+        n_true_to_false_transitions=search.n_true_to_false_transitions,
+        n_success_windows=search.n_success_windows,
         n_adv_path=n_adv_path,
         achieved_n_adv=achieved,
+        verified=search.verified,
+        gram=gram,
         perturbed_matrix=perturbed_matrix,
     )
 
@@ -558,29 +711,51 @@ def matrix_oracle_for_query(
     target_n_adv: int = 5,
     alpha_max: float = 2.0,
 ) -> List[MatrixOracleResult]:
-    """Phase 4A over every currently-non-AND candidate (defense-native
+    """Phase 4A+4B over every currently-non-AND candidate (defense-native
     selection -- `non_and_indices` must be derived from Stage-1 flags only,
-    never from `is_poison`). Tries `boost` first; if boost cannot reach the
-    target for a candidate, also tries `decrease` (Phase 4B)."""
+    never from `is_poison`). V2 CORRECTION: always runs BOTH `boost` AND
+    `decrease` for every candidate (V1's "only try decrease if boost fails"
+    shortcut is removed for this correction pass, so a second successful
+    mode can never be silently hidden by control flow)."""
     results = []
     for i in non_and_indices:
-        boost = matrix_oracle_for_candidate(matrix, i, target_n_adv, mode="boost", alpha_max=alpha_max)
-        results.append(boost)
-        if boost.alpha is None:
-            decrease = matrix_oracle_for_candidate(
-                matrix, i, target_n_adv, mode="decrease", alpha_max=alpha_max
-            )
-            results.append(decrease)
+        results.append(matrix_oracle_for_candidate(matrix, i, target_n_adv, mode="boost", alpha_max=alpha_max))
+        results.append(matrix_oracle_for_candidate(matrix, i, target_n_adv, mode="decrease", alpha_max=alpha_max))
     return results
 
 
-def best_matrix_oracle_result(results: List[MatrixOracleResult]) -> Optional[MatrixOracleResult]:
-    """Defense-native selection: smallest alpha among all candidates/modes
-    that reached the target -- never uses `is_poison`."""
+def select_matrix_winner(
+    results: List[MatrixOracleResult],
+    original_matrix: np.ndarray,
+    require_psd: bool = False,
+    psd_tol: str = "1e8",
+) -> Optional[MatrixOracleResult]:
+    """Phase-4 STEP 7 winner selection with the documented tie-break:
+    (1) smallest reachable/refined alpha; (2) smaller Frobenius norm of
+    `S'-S`; (3) lower candidate index. If `require_psd`, restricts to the
+    PSD-valid subset FIRST (`psd_tol` in {"1e8", "1e6"}), then applies the
+    identical tie-break -- this is how the separate `best_psd_valid_winner`
+    is derived (STEP 4A/7). Never uses `is_poison`."""
     achieving = [r for r in results if r.alpha is not None]
+    if require_psd:
+        key = "psd_valid_tol_1e8" if psd_tol == "1e8" else "psd_valid_tol_1e6"
+        achieving = [r for r in achieving if r.gram is not None and r.gram[key]]
     if not achieving:
         return None
-    return min(achieving, key=lambda r: r.alpha)
+
+    def _frobenius(r: MatrixOracleResult) -> float:
+        return float(np.linalg.norm(r.perturbed_matrix - original_matrix))
+
+    min_alpha = min(r.alpha for r in achieving)
+    tol = 1e-12
+    tied_alpha = [r for r in achieving if abs(r.alpha - min_alpha) <= tol]
+    if len(tied_alpha) == 1:
+        return tied_alpha[0]
+    min_frob = min(_frobenius(r) for r in tied_alpha)
+    tied_frob = [r for r in tied_alpha if abs(_frobenius(r) - min_frob) <= 1e-12]
+    if len(tied_frob) == 1:
+        return tied_frob[0]
+    return min(tied_frob, key=lambda r: r.candidate_index)
 
 
 # ---------------------------------------------------------------------------
@@ -595,23 +770,42 @@ def stage2_causal_check(perturbed_matrix: np.ndarray, is_poison: np.ndarray, n_a
     """Reruns the UNCHANGED `stage2_pair_frequency` on the PERTURBED matrix
     at the fixed `n_adv`. `is_poison` is used ONLY to score the resulting
     (already-selected) removed-index set, never to influence Stage 2's
-    selection itself."""
+    selection itself. Also reports the PP/PC/CC pair composition of the
+    top-pair set and the full frequency-score vector (Phase 5, STEP 8)."""
+    is_poison = np.asarray(is_poison, dtype=bool)
+    k = len(is_poison)
     stage2 = ri.stage2_pair_frequency(perturbed_matrix, n_adv=n_adv, p=2.0)
     removed = set(stage2.selected_indices)
     removed_poison = sum(1 for idx in removed if is_poison[idx])
     removed_clean = sum(1 for idx in removed if not is_poison[idx])
-    n_poison = int(np.asarray(is_poison).sum())
+    n_poison = int(is_poison.sum())
+    n_clean = k - n_poison
     residual_poison = n_poison - removed_poison
+    residual_clean = n_clean - removed_clean
     label = (
         STAGE2_LABEL_COUNT_FIX_SUCCESSFUL
         if (residual_poison == 0 and removed_clean == 0)
         else STAGE2_LABEL_COUNT_FIX_DEGRADED
     )
+    pp = pc = cc = 0
+    for x, y, _sim in stage2.top_pairs:
+        if is_poison[x] and is_poison[y]:
+            pp += 1
+        elif (not is_poison[x]) and (not is_poison[y]):
+            cc += 1
+        else:
+            pc += 1
     return {
         "removed_indices": sorted(removed),
         "removed_poison": removed_poison,
         "removed_clean": removed_clean,
         "residual_poison": residual_poison,
+        "residual_clean": residual_clean,
+        "n_pairs": stage2.n_pairs,
+        "pp_count": pp,
+        "pc_count": pc,
+        "cc_count": cc,
+        "frequency_scores": stage2.frequency_scores.tolist(),
         "label": label,
     }
 
@@ -634,4 +828,99 @@ def perturbation_effect_size(original: np.ndarray, perturbed: np.ndarray) -> dic
         "mean_abs_off_diag_change": float(np.abs(off_diag_diff).mean()) if off_diag_diff.size else 0.0,
         "frobenius_norm_diff": float(np.linalg.norm(diff)),
         "fraction_off_diag_changed": float(n_changed / n_off_diag) if n_off_diag else 0.0,
+    }
+
+
+# ---------------------------------------------------------------------------
+# MUTUAL-MEDIAN MECHANISM VALIDATION (V2 correction, Phase 5/STEP 5)
+#
+# The V1 report's headline mechanistic claim -- "the exact rank5/rank6
+# s_median tie in 11/14 MEDIAN-LIMITED failures is caused by a
+# 'mutual-median-match' passage pair" -- was demonstrated on ONE worked
+# example, not verified query-by-query. This section makes that check
+# explicit and exhaustive, using PROVIDER SETS (not single indices) to
+# correctly handle rows with more than one neighbor tied at the median
+# value.
+# ---------------------------------------------------------------------------
+
+def median_provider_indices(matrix: np.ndarray, i: int) -> set:
+    """Every neighbor `j != i` whose similarity `S_ij` equals passage `i`'s
+    own (self-excluded, torch-style) per-passage median `s_median_i` --
+    i.e. the SET of off-diagonal neighbors that supply the median-ranked
+    value in row `i`. A set, not a single index, because more than one
+    neighbor can carry exactly the median value when there are ties within
+    a single row's 9 off-diagonal similarities."""
+    matrix = np.asarray(matrix, dtype=np.float64)
+    k = matrix.shape[0]
+    row = matrix[i, :]
+    others = [j for j in range(k) if j != i]
+    off_diag_vals = np.array([row[j] for j in others], dtype=np.float64)
+    median_val = ri._torch_style_median_1d(off_diag_vals)  # noqa: SLF001
+    return {j for j in others if row[j] == median_val}
+
+
+def identify_tied_boundary_passages(s_median: np.ndarray) -> dict:
+    """Identifies the passage index/indices occupying the tied rank-5/
+    rank-6 boundary of `s_median` (torch-style lower-middle convention,
+    `k=10` -> 0-indexed positions 4 and 5). Handles ties of width >2 by
+    returning every index whose `s_median` value equals the tied boundary
+    value, not just the two canonical rank-5/rank-6 positions."""
+    s_median = np.asarray(s_median, dtype=np.float64)
+    k = s_median.shape[0]
+    sorted_order = np.argsort(s_median, kind="stable")
+    rank5_pos = (k - 1) // 2
+    rank6_pos = rank5_pos + 1
+    rank5_idx = int(sorted_order[rank5_pos])
+    rank6_idx = int(sorted_order[rank6_pos]) if rank6_pos < k else None
+    is_tied = rank6_idx is not None and s_median[rank5_idx] == s_median[rank6_idx]
+    tied_value = float(s_median[rank5_idx])
+    tied_indices = sorted(i for i in range(k) if s_median[i] == tied_value) if is_tied else []
+    return {
+        "rank5_idx": rank5_idx,
+        "rank6_idx": rank6_idx,
+        "is_tied": is_tied,
+        "tied_value": tied_value if is_tied else None,
+        "tied_indices": tied_indices,
+    }
+
+
+def mutual_median_validation_for_query(matrix: np.ndarray, s_median: np.ndarray) -> dict:
+    """Full STEP 5 validation for one query: identifies the tied
+    rank5/rank6 boundary passages, computes each tied passage's median-
+    provider SET, and determines whether at least one MUTUAL match exists
+    (`j in providers(i)` AND `i in providers(j)`) among the tied passages.
+
+    `mutual_median_match` is True iff such a pair exists. This is checked
+    directly from the matrix/statistics -- no assumption, no conditional
+    no-op assertion (see STEP 5A)."""
+    boundary = identify_tied_boundary_passages(s_median)
+    if not boundary["is_tied"]:
+        return {
+            **boundary,
+            "providers": {},
+            "mutual_median_match": False,
+            "mutual_pairs": [],
+            "shared_matrix_entry": None,
+        }
+
+    tied_indices = boundary["tied_indices"]
+    providers = {i: median_provider_indices(matrix, i) for i in tied_indices}
+
+    mutual_pairs = set()
+    for i in tied_indices:
+        for j in providers[i]:
+            if j in tied_indices and i in providers.get(j, set()):
+                mutual_pairs.add(tuple(sorted((i, j))))
+
+    shared_matrix_entry = None
+    if mutual_pairs:
+        i0, j0 = sorted(mutual_pairs)[0]
+        shared_matrix_entry = float(matrix[i0, j0])
+
+    return {
+        **boundary,
+        "providers": {i: sorted(v) for i, v in providers.items()},
+        "mutual_median_match": len(mutual_pairs) > 0,
+        "mutual_pairs": sorted(mutual_pairs),
+        "shared_matrix_entry": shared_matrix_entry,
     }

@@ -349,7 +349,10 @@ class TestNoGroundTruthLabelInPrimarySelection(unittest.TestCase):
         self.assertNotIn("is_poison", sig.parameters)
 
     def test_best_matrix_result_signature_has_no_is_poison(self):
-        sig = inspect.signature(lib.best_matrix_oracle_result)
+        # `best_matrix_oracle_result` was superseded in V2 by
+        # `select_matrix_winner` (see
+        # test_ragdefender_regime_b_stage1_oracle_v2.py) -- same guarantee.
+        sig = inspect.signature(lib.select_matrix_winner)
         self.assertNotIn("is_poison", sig.parameters)
 
     def test_selection_result_identical_regardless_of_poison_permutation(self):
@@ -517,32 +520,41 @@ class TestHistoricalMatricesNeverOverwritten(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class TestNonMonotonicityDetection(unittest.TestCase):
+    """NOTE (V2 correction): `_monotonic_or_grid_search` now returns a
+    `GridSearchResult` dataclass (`.earliest_success_alpha`, `.is_monotonic`,
+    `.coarse_path`, ...) instead of a 3-tuple -- see
+    `tests/test_ragdefender_regime_b_stage1_oracle_v2.py` for the full
+    regression suite covering the V1 endpoint-only false-negative bug this
+    rewrite fixes (transient success with a False endpoint, multiple
+    success windows, etc.)."""
+
     def test_monotonic_predicate_detected_as_monotonic(self):
         def predicate(alpha):
             return alpha >= 0.5
 
-        delta, is_monotonic, path = lib._monotonic_or_grid_search(predicate, lo=0.0, hi=1.0, coarse_steps=50)
-        self.assertTrue(is_monotonic)
-        self.assertIsNotNone(delta)
-        self.assertAlmostEqual(delta, 0.5, places=3)
+        result = lib._monotonic_or_grid_search(predicate, lo=0.0, hi=1.0, coarse_steps=50)
+        self.assertTrue(result.is_monotonic)
+        self.assertIsNotNone(result.earliest_success_alpha)
+        self.assertAlmostEqual(result.earliest_success_alpha, 0.5, places=3)
 
     def test_non_monotonic_predicate_detected_as_non_monotonic(self):
         def predicate(alpha):
             # True on [0.2, 0.4), False again on [0.4, 0.7), True from 0.7 on.
             return (0.2 <= alpha < 0.4) or (alpha >= 0.7)
 
-        delta, is_monotonic, path = lib._monotonic_or_grid_search(predicate, lo=0.0, hi=1.0, coarse_steps=100)
-        self.assertFalse(is_monotonic)
-        self.assertIsNotNone(delta)
-        self.assertTrue(predicate(delta))
+        result = lib._monotonic_or_grid_search(predicate, lo=0.0, hi=1.0, coarse_steps=100)
+        self.assertFalse(result.is_monotonic)
+        self.assertIsNotNone(result.earliest_success_alpha)
+        self.assertTrue(predicate(result.earliest_success_alpha))
 
     def test_never_true_returns_none(self):
-        delta, is_monotonic, path = lib._monotonic_or_grid_search(lambda a: False, lo=0.0, hi=1.0, coarse_steps=20)
-        self.assertIsNone(delta)
+        result = lib._monotonic_or_grid_search(lambda a: False, lo=0.0, hi=1.0, coarse_steps=20)
+        self.assertIsNone(result.earliest_success_alpha)
+        self.assertFalse(result.reachable)
 
     def test_path_length_matches_coarse_steps(self):
-        _, _, path = lib._monotonic_or_grid_search(lambda a: a > 0.5, lo=0.0, hi=1.0, coarse_steps=40)
-        self.assertEqual(len(path), 41)
+        result = lib._monotonic_or_grid_search(lambda a: a > 0.5, lo=0.0, hi=1.0, coarse_steps=40)
+        self.assertEqual(len(result.coarse_path), 41)
 
     def test_matrix_oracle_result_exposes_full_n_adv_path(self):
         matrix = _symmetric_matrix(10, seed=37)
