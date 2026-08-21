@@ -25,7 +25,7 @@
 % the ML-FilterRAG threshold sweep table, and a ~2-page appendix derivation of
 % RAGDefender Stage 1/Stage 2) has been OVERWRITTEN. Recoverable via git history.
 % The two reusable fragments were carried forward: the hyperparameter-rationale
-% paragraph (now Sec. V-B) and the compressed threshold sweep (now Table IV).
+% paragraph (now Sec. V-A) and the compressed threshold sweep (now Table IV).
 
 \documentclass[conference]{IEEEtran}
 \IEEEoverridecommandlockouts
@@ -360,13 +360,16 @@ from per-passage mean and median pairwise cosine similarity within the retrieved
 set. A second stage accumulates, for each passage, how often it appears among
 the $\binom{\widehat{N}_{\mathrm{adv}}}{2}$ most similar pairs, and removes the
 $\widehat{N}_{\mathrm{adv}}$ passages with the highest resulting pair-frequency
-score. The operative assumption is that poisoned passages reveal themselves through
-concentrated overlap with the question and the candidate answer terms used by
-the filter, relative to their own length. Under the evaluated configuration, 
-our stress tests probe whether pair-frequency structure remains discriminative 
-when poisoned passages are moved toward cleaner neighborhood structure. 
-Our oracle analysis is scoped to the RAGDefender configuration evaluated in our experiments; 
-we do not claim that every RAGDefender variant fails for the same mechanism without rerunning the
+score. The operative assumption is that poisoned passages form detectable
+similarity structure relative to clean passages --- concretely, that they are the
+densest high-similarity subgraph of the retrieved set --- and because that signal
+is relative rather than per-passage, it is most meaningful when benign retrieved
+passages are present as contrast. Under the evaluated configuration, our stress
+tests probe whether pair-frequency structure remains discriminative when poisoned
+passages are moved toward cleaner neighborhood structure. Our oracle analysis is
+scoped to the RAGDefender configuration evaluated in our experiments; we do not
+claim that
+every RAGDefender variant fails for the same mechanism without rerunning the
 corresponding configuration.
 \VERIFY{state which RAGDefender configuration produced the oracle results of
 Sec.~\ref{subsec:rq2}; a paper-faithful configuration exists and has not been
@@ -380,11 +383,10 @@ terms are matched into the passage, and the summed frequency of matched terms is
 normalized by the passage's unique-word count. A passage whose density exceeds a
 threshold $\epsilon$ is removed. The operative assumption is that poisoned
 passages reveal themselves through concentrated overlap with the question and
-the target answer relative to their own length. Unlike RAGDefender the statistic
-is per-passage, because that signal is relative rather than per-passage, it is most meaningful
-when the retrieved set contains benign passages against which poisoned structure
-can be contrasted. We use the semantic matching mode as the paper-faithful FilterRAG setting and treat
-exact matching as an ablation.
+the candidate answer terms used by the filter, relative to their own length.
+Unlike RAGDefender, the statistic is per-passage, so it does not require benign
+passages as a contrast set. We use the semantic matching mode as the
+paper-faithful FilterRAG setting and treat exact matching as an ablation.
 \COMPLETED{paper-faithful semantic matching mode implemented}
 
 \subsubsection{ML-FilterRAG}
@@ -567,8 +569,8 @@ Answer generation
 
 \subsection{Oracle Perturbations}
 \label{subsec:oracle}
-Oracle perturbations are not passage rewrites. They are diagnostic interventions,
-acting on a frozen space, used to identify which geometric or feature signals a
+Oracle perturbations are not passage rewrites. They are diagnostic interventions
+that act on a frozen space to identify which geometric or feature signals a
 defense depends on.
 
 \textit{E1 clean-anchor interpolation.} Each poisoned embedding is interpolated
@@ -597,8 +599,8 @@ paper-faithful reruns may re-attribute the dominant failure mechanism.
 
 \subsection{Targeted Text Mutation Families}
 \label{subsec:families_mut}
-Three hand-authored GPT rewrite families, one per targeted assumption, each
-rewriting all $\Npoison$ poisoned passages of a query while preserving the
+We define three hand-authored GPT rewrite families, one per targeted assumption,
+each rewriting all $\Npoison$ poisoned passages of a query while preserving the
 attacker's target wrong answer. The mutation families are stress-test operators
 designed to probe defense assumptions.
 
@@ -784,82 +786,97 @@ shared-feature path that predicts transfer of low-overlap rewrites.
 \label{sec:setup}
 % Budget: ~0.85 pg. No floats of its own; Table IV lives in Sec. VI-C.
 
-\subsection{Dataset and Retrieval Setup}
-\TODO{HotpotQA (BEIR) with a dense retriever; state the encoder and scoring
-function, and that all stress-testing regimes use one dataset and one
-retriever~\cite{yang2018hotpotqa,izacard2022contriever}.}
-
-\subsection{Poisoning Budget and Top-$k$}
+\subsection{Dataset, Retrieval, and Poisoning Budget}
 \label{subsec:budget}
-% Carried forward near-verbatim from the notes file: the strongest existing
-% paragraph. Unicode quotes replaced with ASCII; citations to be added.
-We set $N=\Npoison$ poisoned passages per target query to match the PoisonedRAG
-default setting~\cite{zou2025poisonedrag}. We evaluate $k=5$ and $k=\Ktop$ to
-separate two retrieval regimes. The $k=5$ setting corresponds to the PoisonedRAG
-default and represents a poison-saturated context in which the number of
-retrieved passages equals the number of injected poisoned passages. The
-$k=\Ktop$ setting probes a mixed clean/poison regime where $k > N$, which
-PoisonedRAG's own ablation identifies as the point where clean retrieved passages
-enter the context while poisoned passages are still usually retrieved. This mixed
-regime is particularly important for post-retrieval defenses such as RAGDefender
-and FilterRAG, because their filtering decisions depend on the composition of the
-retrieved top-$k$ set. The $k=5$ regime also violates RAGDefender's stated
-requirement that at least one benign passage be retrieved, which is why
-$k=\Ktop$ is the regime used for all stress-testing regimes above the nominal
-one.
+% Second paragraph carried forward from the notes file, condensed; the
+% RAGDefender sentence was rewritten to drop the "requires benign passages"
+% absolute.
+All text-level regimes share one dataset and one retriever: the HotpotQA test
+split in BEIR format~\cite{yang2018hotpotqa} encoded with
+Contriever~\cite{izacard2022contriever} under inner-product scoring. We use the
+PoisonedRAG black-box LM-targeted procedure~\cite{zou2025poisonedrag} to
+construct poison over a shared 50-query pool, from which every query set below is
+drawn: $\NdevQ$ queries for the targeted-mutation development set, a 40/10
+train/held-out split for the ML-FilterRAG-top-$k$ proxy, $\NrrkwCases$
+shortlisted cases for RobustRAG-KW answer generation, and $\NconfQ$ further
+held-out queries for the planned confirmation set.
+\VERIFY{Before submission, mirror the 50-query pool and 40/10 ML-FilterRAG split
+manifest into a tracked artifact for reproducibility.} We set $N=\Npoison$
+poisoned passages per target query, the PoisonedRAG default, and evaluate two
+depths. At $k=5$ retrieved and injected counts coincide, a poison-saturated
+context reported as a nominal condition. At $k=\Ktop$ the context is mixed, which
+PoisonedRAG's ablation identifies as the point where clean passages enter while
+poison is still usually retrieved; it is therefore the stress-testing setting. Set-level defenses such as RAGDefender are most informative in the mixed
+regime, where poisoned structure can be contrasted against benign retrieved
+passages. Full-retrieval replacement preserves the self-query poison budget at
+$N=\Npoison$ by replacement rather than addition.
 
 \subsection{Defense Implementations}
-\TODO{One short paragraph per family naming the concrete implementation and every
-proxy substitution: the small LM standing in for the paper's generator inside
-FilterRAG, the perplexity model, the ML-FilterRAG-top-$k$ pipeline substitution,
-and the keyword-vote form of RobustRAG-KW. These belong here, not only in
-Section~\ref{sec:limitations}.}
+\emph{RAGDefender} is run in one configuration throughout, scoring Stage-1 and
+Stage-2 pairwise structure with a sentence-transformer encoder; every
+RAGDefender claim here is scoped to it.
+\VERIFY{the evaluated configuration is the legacy variant; a paper-faithful
+variant exists and has not been rerun through the oracle or mutation sequences}
+\emph{FilterRAG} uses semantic matching, the paper-faithful setting, with
+\texttt{flan-t5-small} producing the candidate answer and an all-MiniLM encoder
+matching query and answer terms into each passage; exact matching is a diagnostic
+ablation. \emph{ML-FilterRAG} is an \emph{ML-FilterRAG-top-$k$ proxy}: a random
+forest over the four features of
+Sec.~\ref{subsec:families} --- density score, matched-keyword frequency sum,
+passage perplexity under \texttt{distilgpt2}, and the small model's
+log-probability for its own answer --- trained on 40 pool queries and evaluated
+on 10 held out, scoring the retrieved top-$k$ set rather than the published
+top-$s$, filter, then top-$k$ pipeline. \emph{RobustRAG-KW} is a
+RobustRAG-inspired keyword/vote proxy~\cite{xiang2024robustrag}: each retrieved
+passage is isolated into its own generator call, a short answer is extracted and
+normalized, and the normalized answers are aggregated by vote. It is not a
+certified RobustRAG reproduction. Because each case costs one call per passage
+plus aggregation, it is run only on shortlisted cases.
 
-\subsection{Model and Generation Setup}
-\TODO{Generator model, decoding settings, and the fixed prompt template used for
-every answer-generation condition; note that RobustRAG-KW issues one isolated
-call per retrieved passage plus one aggregation step.}
+\subsection{Generation Setup}
+Answer generation uses \texttt{gpt-3.5-turbo} at temperature $0.1$ with a
+150-token limit and one fixed prompt template shared by every condition.
+\VERIFY{artifacts record the API model alias, not a dated snapshot} Standard
+generation issues one call on the full post-defense context; RobustRAG-KW issues
+one isolated call per retrieved passage plus aggregation. Generation is cached by
+a (model, prompt) hash and the test suite makes no API calls
+(Sec.~\ref{subsec:repro}).
 
 \subsection{Development Set versus Confirmation Set}
-The $\NdevQ$-query targeted mutation work is the \emph{development set}: it is
-where the rewrite prompts were designed, so it cannot also serve as held-out
-confirmation. The planned $\NconfQ$-query dataset of
-Sec.~\ref{subsec:confirmation} is the \emph{confirmation set}.
-\PENDING{larger GPT confirmation set}
+The $\NdevQ$-query targeted mutation work is the \emph{development set}: the
+rewrite prompts were designed on it, so it supports failure-mode discovery rather
+than benchmark-wide rates and cannot serve as held-out confirmation. The planned
+\emph{confirmation set} (Sec.~\ref{subsec:confirmation}) is $\NconfQ$ held-out
+HotpotQA queries at the same depth and budget, 3 families $\times$ 2 bundles
+$\times$ $\Npoison$ passages, i.e. $\NconfPassages$ mutated passages, with the
+prompt packets frozen beforehand. \PENDING{larger GPT confirmation set}
 
 \subsection{Thresholds and Operating Points}
-\TODO{FilterRAG $\epsilon$ and the fact that it was not retuned for the proxy
-small LM.} For ML-FilterRAG-top-$k$ we use $t=\mlthresh$ throughout as the
-clean-preserving operating point, selected from the threshold sweep of
-Table~\ref{tab:mlfilterrag_threshold} and held fixed in every cross-defense
-comparison. \COMPLETED{development-set result}
+\label{subsec:thresholds}
+FilterRAG uses the published density threshold $\epsilon=0.2$ with a semantic
+matching threshold of $0.6$, neither retuned for the proxy small LM. For the
+ML-FilterRAG-top-$k$ proxy, $t=\mlthresh$ is the clean-preserving operating
+point, selected from the sweep of Table~\ref{tab:mlfilterrag_threshold} and held
+fixed in every cross-defense comparison. \COMPLETED{development-set result}
+RobustRAG-KW uses its default rule: a winner must hold at least half of the
+non-abstaining vote, and a contested or tied vote yields abstention.
 
-\subsection{Metrics}
-\begin{itemize}
-  \item \textit{Removed poison} and \textit{removed clean}: counts of retrieved
-        poisoned and clean passages the defense removes.
-  \item \textit{Residual poison fraction}: the poison share of the \emph{surviving}
-        context, not of the retrieved set. This definition differs from the
-        intuitive reading and must be stated explicitly in the paper.
-  \item \textit{Strict ASR}: the attacker's target answer appears in the generated
-        answer under token-boundary matching.
-  \item \textit{Abstention}: the generator or aggregator declines to answer;
-        counted separately from a correct answer.
-  \item \textit{Wrong-answer vote share} and \textit{correct-answer vote share}:
-        for RobustRAG-KW, the fraction of isolated per-passage answers voting for
-        the attacker's answer and for the gold answer.
-  \item \textit{Self-query versus cross-query poison}: retrieved poisoned passages
-        authored for this query versus for a different pool query, reported
-        separately.
-\end{itemize}
-
-\subsection{Reporting Conventions}
-\TODO{State the known limitations of strict matching, in particular that
-token-boundary matching over-counts on yes/no answers and on answers that are
-prefixes of other tokens, and that a strict hit co-occurring with the correct
-answer is adjudicated rather than counted automatically. Report counts rather
-than rates wherever the cases were shortlisted.}
-\NOOVERCLAIM{shortlist only}
+\subsection{Metrics and Reporting Conventions}
+We report \emph{removed poison} and \emph{removed clean}, the counts of retrieved
+poisoned and clean passages a filter discards, and the \emph{residual poison
+fraction}, which is measured over the surviving post-defense context, not over
+the originally retrieved top-$k$ set. At the answer level we report \emph{strict
+ASR}, a token-boundary match of the attacker's target answer, and
+\emph{abstention}, counted separately so a refusal is never merged with a correct
+answer; RobustRAG-KW adds the \emph{wrong-answer} and \emph{correct-answer vote
+shares} over the isolated per-passage answers. Retrieved poison is always
+reported split by origin into \emph{self-query} and \emph{cross-query poison}
+(Sec.~\ref{subsec:regimes}). Strict matching over-counts on yes/no and
+contrastive answers, and an answer carrying both the strict target string and the
+correct answer is adjudicated rather than counted automatically. RobustRAG-KW
+outcomes come from a shortlisted, filter-stress sample and are reported as
+counts, never rates. \NOOVERCLAIM{shortlist only} Development-set numbers are
+prompt-design and failure-mode evidence: confirmation-set evaluation is pending.
 
 % ===============================================================
 \section{Results}
@@ -1148,9 +1165,9 @@ does not support a rate. \NOOVERCLAIM{shortlist only}}
 % source: results/diagnostics/ml_filterrag_eval_hotpotqa_50q_t04/
 % Compressed from the 8-row sweep in the previous notes file; the full sweep stays
 % an external artifact. First candidate for cutting if the page budget tightens.
-% Placement note: this table is first referenced from Sec. V-F (thresholds), which
+% Placement note: this table is first referenced from Sec. V-E (thresholds), which
 % is earlier than its definition point here, so it will float after that
-% reference. Move the definition up into Sec. V-F if the ordering reads badly.
+% reference. Move the definition up into Sec. V-E if the ordering reads badly.
 \begin{table}[!t]
 \centering
 \caption{ML-FilterRAG-top-$k$ proxy threshold sweep on a held-out HotpotQA

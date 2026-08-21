@@ -29,13 +29,13 @@
 \citation{kim2025ragdefender}
 \citation{edemacu2025filterrag}
 \citation{edemacu2025filterrag}
-\citation{xiang2024robustrag}
 \@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {III-B}}Defenses Under Study}{3}{}\protected@file@percent }
 \newlabel{subsec:families}{{\mbox  {III-B}}{3}{}{subsection.3.2}{}}
 \@writefile{toc}{\contentsline {subsubsection}{\numberline {\mbox  {III-B}1}RAGDefender}{3}{}\protected@file@percent }
 \@writefile{toc}{\contentsline {subsubsection}{\numberline {\mbox  {III-B}2}FilterRAG}{3}{}\protected@file@percent }
 \@writefile{toc}{\contentsline {subsubsection}{\numberline {\mbox  {III-B}3}ML-FilterRAG}{3}{}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsubsection}{\numberline {\mbox  {III-B}4}RobustRAG-KW}{3}{}\protected@file@percent }
+\citation{xiang2024robustrag}
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {\mbox  {III-B}4}RobustRAG-KW}{4}{}\protected@file@percent }
 \@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {III-C}}Defense Assumptions}{4}{}\protected@file@percent }
 \newlabel{subsec:assumptions}{{\mbox  {III-C}}{4}{}{subsection.3.3}{}}
 \@writefile{toc}{\contentsline {section}{\numberline {IV}Stress-Testing Methodology}{4}{}\protected@file@percent }
@@ -45,14 +45,14 @@
 \newlabel{subsec:regimes}{{\mbox  {IV-A}}{4}{}{subsection.4.1}{}}
 \@writefile{lot}{\contentsline {table}{\numberline {I}{\ignorespaces Defense families, the signal each decision rule reads, the assumption that signal encodes, and the stress pressure applied in this paper.}}{4}{}\protected@file@percent }
 \newlabel{tab:defense_assumptions}{{I}{4}{}{table.1}{}}
-\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {IV-B}}Oracle Perturbations}{4}{}\protected@file@percent }
-\newlabel{subsec:oracle}{{\mbox  {IV-B}}{4}{}{subsection.4.2}{}}
 \citation{gretton2012mmd}
 \citation{sun2016coral}
 \citation{zou2025poisonedrag}
 \citation{xiang2024robustrag}
 \@writefile{lot}{\contentsline {table}{\numberline {II}{\ignorespaces Evaluation regimes, what each controls, what each tests, and status.}}{5}{}\protected@file@percent }
 \newlabel{tab:evaluation_levels}{{II}{5}{}{table.2}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {IV-B}}Oracle Perturbations}{5}{}\protected@file@percent }
+\newlabel{subsec:oracle}{{\mbox  {IV-B}}{5}{}{subsection.4.2}{}}
 \@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {IV-C}}Targeted Text Mutation Families}{5}{}\protected@file@percent }
 \newlabel{subsec:families_mut}{{\mbox  {IV-C}}{5}{}{subsection.4.3}{}}
 \@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {IV-D}}Fixed-Context and Full-Retrieval Evaluation}{5}{}\protected@file@percent }
@@ -61,48 +61,47 @@
 \@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {IV-E}}Answer Generation and RobustRAG-KW Evaluation}{5}{}\protected@file@percent }
 \newlabel{subsec:answergen}{{\mbox  {IV-E}}{5}{}{subsection.4.5}{}}
 \citation{jin2020textfooler,li2020bertattack,morris2020textattack}
-\citation{yang2018hotpotqa,izacard2022contriever}
+\citation{yang2018hotpotqa}
+\citation{izacard2022contriever}
 \citation{zou2025poisonedrag}
-\@writefile{lof}{\contentsline {figure}{\numberline {1}{\ignorespaces Stress-testing pipeline. A stress operator enters at exactly one stage, and the entry point determines what its result licenses. \textbf  {[TODO: Redraw with the four regimes of Table~\ref {tab:evaluation_levels} marked as gates between stages.]}}}{6}{}\protected@file@percent }
-\newlabel{fig:pipeline}{{1}{6}{}{figure.1}{}}
+\citation{xiang2024robustrag}
 \@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {IV-F}}Confirmation-Set and Toolkit Protocols}{6}{}\protected@file@percent }
 \newlabel{subsec:confirmation}{{\mbox  {IV-F}}{6}{}{subsection.4.6}{}}
 \newlabel{subsec:toolkit}{{\mbox  {IV-F}}{6}{}{subsection.4.6}{}}
 \@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {IV-G}}Reproducibility Controls}{6}{}\protected@file@percent }
 \newlabel{subsec:repro}{{\mbox  {IV-G}}{6}{}{subsection.4.7}{}}
-\@writefile{lof}{\contentsline {figure}{\numberline {2}{\ignorespaces Conceptual map from defense families to the assumptions their decision rules encode. The edge from ML-FilterRAG to lexical/semantic density is the shared-feature path that predicts transfer of low-overlap rewrites. \textbf  {[TODO: Annotate each edge with the stress operator that targets it.]}}}{6}{}\protected@file@percent }
-\newlabel{fig:defense_assumption_map}{{2}{6}{}{figure.2}{}}
 \@writefile{toc}{\contentsline {section}{\numberline {V}Experimental Setup}{6}{}\protected@file@percent }
 \newlabel{sec:setup}{{V}{6}{}{section.5}{}}
-\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {V-A}}Dataset and Retrieval Setup}{6}{}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {V-B}}Poisoning Budget and Top-$k$}{6}{}\protected@file@percent }
-\newlabel{subsec:budget}{{\mbox  {V-B}}{6}{}{subsection.5.2}{}}
-\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {V-C}}Defense Implementations}{6}{}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {V-D}}Model and Generation Setup}{6}{}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {V-E}}Development Set versus Confirmation Set}{7}{}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {V-F}}Thresholds and Operating Points}{7}{}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {V-G}}Metrics}{7}{}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {V-H}}Reporting Conventions}{7}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {V-A}}Dataset, Retrieval, and Poisoning Budget}{6}{}\protected@file@percent }
+\newlabel{subsec:budget}{{\mbox  {V-A}}{6}{}{subsection.5.1}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {1}{\ignorespaces Stress-testing pipeline. A stress operator enters at exactly one stage, and the entry point determines what its result licenses. \textbf  {[TODO: Redraw with the four regimes of Table~\ref {tab:evaluation_levels} marked as gates between stages.]}}}{6}{}\protected@file@percent }
+\newlabel{fig:pipeline}{{1}{6}{}{figure.1}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {2}{\ignorespaces Conceptual map from defense families to the assumptions their decision rules encode. The edge from ML-FilterRAG to lexical/semantic density is the shared-feature path that predicts transfer of low-overlap rewrites. \textbf  {[TODO: Annotate each edge with the stress operator that targets it.]}}}{6}{}\protected@file@percent }
+\newlabel{fig:defense_assumption_map}{{2}{6}{}{figure.2}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {V-B}}Defense Implementations}{6}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {V-C}}Generation Setup}{7}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {V-D}}Development Set versus Confirmation Set}{7}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {V-E}}Thresholds and Operating Points}{7}{}\protected@file@percent }
+\newlabel{subsec:thresholds}{{\mbox  {V-E}}{7}{}{subsection.5.5}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {V-F}}Metrics and Reporting Conventions}{7}{}\protected@file@percent }
 \@writefile{toc}{\contentsline {section}{\numberline {VI}Results}{7}{}\protected@file@percent }
 \newlabel{sec:results}{{VI}{7}{}{section.6}{}}
 \@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {VI-A}}RQ1: What assumptions do existing defenses rely on?}{7}{}\protected@file@percent }
 \newlabel{subsec:rq1}{{\mbox  {VI-A}}{7}{}{subsection.6.1}{}}
-\@writefile{lot}{\contentsline {table}{\numberline {III}{\ignorespaces Oracle perturbations against RAGDefender on the $6$ originally successful development-set cases, under the configuration we evaluate. Oracle-space evidence only.}}{7}{}\protected@file@percent }
-\newlabel{tab:ragdefender_oracle}{{III}{7}{}{table.3}{}}
 \@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {VI-B}}RQ2: Can oracle perturbations expose RAGDefender failure boundaries?}{7}{}\protected@file@percent }
 \newlabel{subsec:rq2}{{\mbox  {VI-B}}{7}{}{subsection.6.2}{}}
 \@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {VI-C}}RQ3: Do targeted text rewrites weaken passage filters?}{7}{}\protected@file@percent }
 \newlabel{subsec:rq3}{{\mbox  {VI-C}}{7}{}{subsection.6.3}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {III}{\ignorespaces Oracle perturbations against RAGDefender on the $6$ originally successful development-set cases, under the configuration we evaluate. Oracle-space evidence only.}}{8}{}\protected@file@percent }
+\newlabel{tab:ragdefender_oracle}{{III}{8}{}{table.3}{}}
 \@writefile{lot}{\contentsline {table}{\numberline {IV}{\ignorespaces Fixed-context cross-defense effect of the targeted mutation families on the development set. Values are the mean change in removed poison passages (of $5$) relative to the unmutated context; negative means the defense removed fewer poisoned passages. $6$ queries, one bundle per query and family.}}{8}{}\protected@file@percent }
 \newlabel{tab:targeted_mutation_fixed_context}{{IV}{8}{}{table.4}{}}
 \@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {VI-D}}RQ4: Do rewritten poison passages survive retrieval?}{8}{}\protected@file@percent }
 \newlabel{subsec:rq4}{{\mbox  {VI-D}}{8}{}{subsection.6.4}{}}
-\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {VI-E}}RQ5: Does generation-time aggregation change the outcome?}{8}{}\protected@file@percent }
-\newlabel{subsec:rq5}{{\mbox  {VI-E}}{8}{}{subsection.6.5}{}}
 \@writefile{lot}{\contentsline {table}{\numberline {V}{\ignorespaces Full-retrieval replacement on the development set: $18$ bundles, replacement only, poison budget preserved at $N=5$.}}{8}{}\protected@file@percent }
 \newlabel{tab:full_retrieval_dev}{{V}{8}{}{table.5}{}}
-\@writefile{lof}{\contentsline {figure}{\numberline {3}{\ignorespaces Cross-defense transfer of the targeted mutation families on the development set. Rows are mutation families, columns are defenses, and cells are the mean change in removed poison passages. \textbf  {[TODO: Generate at publication resolution; consider folding into Table~\ref {tab:targeted_mutation_fixed_context} if the page budget tightens.]}}}{8}{}\protected@file@percent }
-\newlabel{fig:mutation_transfer_heatmap}{{3}{8}{}{figure.3}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {VI-E}}RQ5: Does generation-time aggregation change the outcome?}{8}{}\protected@file@percent }
+\newlabel{subsec:rq5}{{\mbox  {VI-E}}{8}{}{subsection.6.5}{}}
 \@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {VI-F}}RQ6: Do toolkit mutations reproduce the targeted GPT failures?}{8}{}\protected@file@percent }
 \newlabel{subsec:rq6}{{\mbox  {VI-F}}{8}{}{subsection.6.6}{}}
 \@writefile{toc}{\contentsline {section}{\numberline {VII}Discussion and Design Lessons}{8}{}\protected@file@percent }
@@ -110,6 +109,8 @@
 \@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {VII-A}}Lesson 1: Clustering defenses depend on poison-poison structure}{8}{}\protected@file@percent }
 \@writefile{lot}{\contentsline {table}{\numberline {VI}{\ignorespaces RobustRAG-KW generation-time aggregation compared with passage-filtering defenses on shortlisted full-retrieval mutation cases.}}{9}{}\protected@file@percent }
 \newlabel{tab:robustrag_kw_main}{{VI}{9}{}{table.6}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {3}{\ignorespaces Cross-defense transfer of the targeted mutation families on the development set. Rows are mutation families, columns are defenses, and cells are the mean change in removed poison passages. \textbf  {[TODO: Generate at publication resolution; consider folding into Table~\ref {tab:targeted_mutation_fixed_context} if the page budget tightens.]}}}{9}{}\protected@file@percent }
+\newlabel{fig:mutation_transfer_heatmap}{{3}{9}{}{figure.3}{}}
 \@writefile{lof}{\contentsline {figure}{\numberline {4}{\ignorespaces Full-retrieval replacement survival on the development set: mutated self-query poison returning to the top-$10$ and its rank range, with cross-query poison marked separately. \textbf  {[TODO: Generate from the full-retrieval artifacts.]}}}{9}{}\protected@file@percent }
 \newlabel{fig:retrieval_survival}{{4}{9}{}{figure.4}{}}
 \@writefile{lof}{\contentsline {figure}{\numberline {5}{\ignorespaces RobustRAG-KW vote shares over the $9$ shortlisted cases, with the contested region that produces abstention marked. Counts only; the shortlist does not support a rate. \textbf  {[Do not overclaim: shortlist only]}}}{9}{}\protected@file@percent }
@@ -120,7 +121,6 @@
 \@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {VII-C}}Lesson 3: Learned filters inherit their feature assumptions}{9}{}\protected@file@percent }
 \@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {VII-D}}Lesson 4: Aggregation is orthogonal but abstention-heavy}{9}{}\protected@file@percent }
 \@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {VII-E}}Lesson 5: Oracle vulnerability does not imply a text-realizable attack}{9}{}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {VII-F}}Practical Implications for Future RAG Defenses}{9}{}\protected@file@percent }
 \bibstyle{IEEEtran}
 \bibdata{references}
 \bibcite{lewis2020rag}{1}
@@ -140,6 +140,7 @@
 \bibcite{li2020bertattack}{15}
 \bibcite{morris2020textattack}{16}
 \bibcite{yang2018hotpotqa}{17}
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {VII-F}}Practical Implications for Future RAG Defenses}{10}{}\protected@file@percent }
 \@writefile{toc}{\contentsline {section}{\numberline {VIII}Limitations and Future Work}{10}{}\protected@file@percent }
 \newlabel{sec:limitations}{{VIII}{10}{}{section.8}{}}
 \@writefile{toc}{\contentsline {section}{\numberline {IX}Conclusion}{10}{}\protected@file@percent }
