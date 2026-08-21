@@ -781,3 +781,63 @@ mechanism (mutual-median-match, 11/11) and mean-gate mechanism (3/3) are
 both mechanistically precise; the corrected matrix-space analysis gives a
 stable, exhaustive picture. Recommend proceeding to a Regime-C Stage-2
 identification-capacity study (not run in this task).
+
+## 11. Regime-C Stage-2 identification-capacity study (mechanism study)
+
+Second mechanism study, run after Regime B closed. Pure OFFLINE Stage-2
+diagnostic: the true poison count `M` is supplied to
+`stage2_pair_frequency` and held FIXED throughout — Stage 1 is not
+consulted. Full reports:
+`results/diagnostics/ragdefender_regime_c_stage2/REGIME_C_STAGE2_REPORT.md`
+(V1) and `REGIME_C_STAGE2_V2_REPORT.md` (V2 correction pass, this
+section).
+
+**POPULATION** (re-verified unchanged in V2): 20 queries, k=10, M>5, C>=1;
+M distribution {6:8, 7:2, 8:6, 9:4}; true-count Stage 2 = **4/20 success,
+16/20 failure**, reproducing expanded Gate C exactly.
+
+**PAIR SELECTION** (unchanged in V2): PC pairs present in `P_top` **20/20**;
+CC pairs present **8/20**; naturally pure-PP `P_top` **0/20**.
+
+**MECHANISM** (V2 — replaces V1's vague "PP-weighting/other" with a
+proved, computationally-verified graph-theoretic property):
+
+| mechanism | n/16 |
+|---|---|
+| A. PC-contribution-driven (removing PC pairs alone repairs) | 7 |
+| B. PP-coverage-limited (PP-only subgraph of original P_top leaves >=1 poison vertex with degree 0 — theorem, verified 20/20 exact) | 9 |
+| C. other/unexplained | 0 |
+
+**COMPLETE-PP ORACLE**: repairs 16/16, preserves 4/4 successes. Structural
+proof retained (complete true-PP set = `K_M` on the M poison vertices;
+for M>=2 every poison vertex has degree M-1>=1, no clean vertex has any
+degree, so the top-M selection is necessarily exactly the M poison
+passages). Corrected interpretation (V2): this proves complete true-PP
+coverage is *sufficient* for exact identification — it does **not** prove
+non-PP intrusion *alone* is necessary/sufficient for every failure (false
+for the 9 PP-coverage-limited cases, which require restoring missing PP
+edges, not merely removing non-PP ones).
+
+**PAIR-SWAP CERTIFICATION** (V2 — Issue 1 fix): V1's search could silently
+skip exhaustive search of a smaller swap count while mislabeling a larger,
+exhaustively-found count as "exact minimum." Confirmed real impact: one
+query's V1-reported minimum of **10** was actually **8**. V2's corrected,
+vectorized, properly-certified search (cross-checked against an unbounded
+brute-force reference, 16/16 exact agreement, 91s → 0.9s) certifies an
+**exact minimum for all 16/16 failures**: median 4 swaps, range 1–9
+(was 1–10), median `pair_swap_fraction` 0.258 (unchanged), range
+0.048–0.333 (was 0.048–0.357).
+
+**SCORE OVERLAP** (V2 — Issue 4 reframing): `score_overlap>=0` remains an
+exceptionless outcome signature in this population (16/16 failures, 0/4
+successes) but is now explicitly framed as a diagnostic ranking signature,
+not a causal mechanism — the underlying causes are PC contribution (7/16)
+and incomplete PP vertex coverage (9/16).
+
+**Regime-C decision: A — sufficiently characterized.** PC-contribution
+and PP-coverage-limited mechanisms jointly and exclusively explain all 16
+failures (0 unexplained); the complete-PP oracle and certified pair-swap
+oracle both give a full, non-ambiguous pair-set-level account. No
+realizability claim is made — no text/embedding/retrieval experiment was
+run in either the V1 or V2 pass. Recommended next step: cross-defense
+paper synthesis, not another RAGDefender Stage-1/Stage-2 oracle.

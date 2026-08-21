@@ -360,15 +360,13 @@ from per-passage mean and median pairwise cosine similarity within the retrieved
 set. A second stage accumulates, for each passage, how often it appears among
 the $\binom{\widehat{N}_{\mathrm{adv}}}{2}$ most similar pairs, and removes the
 $\widehat{N}_{\mathrm{adv}}$ passages with the highest resulting pair-frequency
-score. The operative assumption is that poisoned passages form detectable
-similarity structure relative to clean passages --- concretely, that they are the
-densest high-similarity subgraph of the retrieved set --- and because that signal
-is relative rather than per-passage, it also requires benign passages to be
-present. Under the evaluated configuration, our stress tests probe whether
-pair-frequency structure remains discriminative when poisoned passages are moved
-toward cleaner neighborhood structure. Our oracle analysis is scoped to the
-RAGDefender configuration evaluated in our experiments; we do not claim that
-every RAGDefender variant fails for the same mechanism without rerunning the
+score. The operative assumption is that poisoned passages reveal themselves through
+concentrated overlap with the question and the candidate answer terms used by
+the filter, relative to their own length. Under the evaluated configuration, 
+our stress tests probe whether pair-frequency structure remains discriminative 
+when poisoned passages are moved toward cleaner neighborhood structure. 
+Our oracle analysis is scoped to the RAGDefender configuration evaluated in our experiments; 
+we do not claim that every RAGDefender variant fails for the same mechanism without rerunning the
 corresponding configuration.
 \VERIFY{state which RAGDefender configuration produced the oracle results of
 Sec.~\ref{subsec:rq2}; a paper-faithful configuration exists and has not been
@@ -383,8 +381,9 @@ normalized by the passage's unique-word count. A passage whose density exceeds a
 threshold $\epsilon$ is removed. The operative assumption is that poisoned
 passages reveal themselves through concentrated overlap with the question and
 the target answer relative to their own length. Unlike RAGDefender the statistic
-is per-passage, so it requires no benign passage in the retrieved set. We use
-the semantic matching mode as the paper-faithful FilterRAG setting and treat
+is per-passage, because that signal is relative rather than per-passage, it is most meaningful
+when the retrieved set contains benign passages against which poisoned structure
+can be contrasted. We use the semantic matching mode as the paper-faithful FilterRAG setting and treat
 exact matching as an ablation.
 \COMPLETED{paper-faithful semantic matching mode implemented}
 
@@ -489,33 +488,47 @@ RobustRAG-KW (proxy)
 \label{sec:method}
 % Budget: ~1.10 pg, contains Fig. 1 and Table II.
 
-\subsection{Overview of the Experimental Pipeline}
-Fig.~\ref{fig:pipeline} shows the pipeline: poison authoring, retrieval, defense,
-generation, and metrics. Each stress operator enters at exactly one stage, and
-the stage it enters at determines what its result can license.
-
-\subsection{Evaluation Regimes}
+\subsection{Overview and Evaluation Regimes}
+\label{subsec:pipeline}
 \label{subsec:regimes}
-Table~\ref{tab:evaluation_levels} defines the four regimes, what each holds
-fixed, what each therefore tests, and its current completion status.
+Fig.~\ref{fig:pipeline} shows the pipeline: poison authoring, retrieval, defense,
+generation, and metrics. Each experiment starts from a target query and the
+$\Npoison$ PoisonedRAG passages authored for it; a \emph{stress-test operator}
+then modifies either those passages' text or
+the embeddings and features a defense computes from them, and an unmodified
+defense implementation scores the result. Each operator enters at exactly one
+stage, and the entry point determines what its result can license. We record
+whether poisoned passages are removed before generation, survive retrieval, or
+reach the generator and drive the answer. Retrieved poison is attributed by
+origin: \emph{self-query poison} was authored for the query under test, while
+\emph{cross-query poison} was authored for a different query of the shared
+adversarial pool and never counts against the target's budget. Text-space
+conditions are \emph{replacement-only mutations}, so the budget stays at
+$N=\Npoison$ throughout. The mutation work is split into a \emph{development
+set}, on which the rewrite prompts were designed, and a held-out
+\emph{confirmation set} (Sec.~\ref{subsec:confirmation}); operating points,
+models, and metric definitions are deferred to Sec.~\ref{sec:setup}.
 
-\textit{Oracle embedding and feature stress tests.} Poison representations are
-modified directly in the space the defense's decision rule reads, with retrieval
-membership and passage text held fixed. Establishes which statistical assumption
-the rule operatively depends on; establishes no attack.
+Table~\ref{tab:evaluation_levels} defines the four regimes in which those
+operators are evaluated. \emph{Oracle embedding and feature stress tests} modify
+poison representations directly in the space a decision rule reads, with
+retrieval membership and passage text held fixed; they establish which
+statistical assumption the rule operatively depends on, and establish no attack.
+\emph{Fixed-context text mutation} rewrites poison text into a retrieved context
+whose membership and order are fixed by construction; it establishes that the
+assumption is reachable by a real passage once poison is already retrieved, and
+nothing about retrieval. \emph{Full-retrieval replacement} substitutes mutated
+for original poison in the corpus and reruns retrieval under a preserved budget,
+establishing that the rewrite still satisfies the retrieval condition.
+\emph{Answer-generation evaluation} runs generation on the post-defense context
+and scores the target incorrect answer, establishing an answer-level outcome for
+the cases evaluated and only for those.
 
-\textit{Fixed-context mutation.} Poison passage \emph{text} is rewritten and
-substituted into a retrieved context whose membership and order are held fixed by
-construction. Establishes that the assumption is reachable by a real passage;
-establishes nothing about retrieval.
-
-\textit{Full-retrieval replacement.} Mutated poison replaces original poison in
-the corpus and retrieval is rerun under a preserved poison budget. Establishes
-that the rewrite still retrieves.
-
-\textit{Answer-generation ASR.} Generation is run on the post-defense context and
-the target incorrect answer is scored. Establishes an answer-level outcome for
-the cases evaluated, and only for those cases.
+The regimes are ordered by realism but not by value: oracle tests expose boundary
+conditions, fixed-context tests isolate defense sensitivity, full-retrieval
+replacement tests retrievability, and answer-generation tests downstream impact.
+They answer different questions and are reported separately; collapsing them into
+one metric would discard the distinction the framework exists to draw.
 
 % --- Table II ------------------------------------------------------------------
 \begin{table}[!t]
@@ -554,84 +567,114 @@ Answer generation
 
 \subsection{Oracle Perturbations}
 \label{subsec:oracle}
-All four operators act on a frozen embedding space with retrieval membership and
-passage text held fixed.
+Oracle perturbations are not passage rewrites. They are diagnostic interventions,
+acting on a frozen space, used to identify which geometric or feature signals a
+defense depends on.
 
 \textit{E1 clean-anchor interpolation.} Each poisoned embedding is interpolated
 toward an assigned clean anchor,
 $\mathbf{z}' = \alpha \mathbf{z}_{\mathrm{poison}} + (1-\alpha)\mathbf{z}_{\mathrm{anchor}}$,
-under several anchor-assignment strategies and a sweep over $\alpha$.
-\TODO{Name the anchor strategies and the $\alpha$ grid.}
+under four anchor-assignment strategies --- rank-aligned, nearest-bijection,
+farthest-bijection, and random --- and a sweep of $\alpha$ from $1.0$ to $0.3$.
 
-\textit{MMD.} Kernel mean matching of the poisoned group toward the clean group,
-with a preservation penalty controlling how far embeddings may move.
+\textit{Distribution matching.} MMD minimization performs kernel mean matching of
+the poisoned group toward the clean group~\cite{gretton2012mmd} under a
+preservation penalty bounding how far embeddings may move; CORAL-PCA and
+CORAL-ridge align covariances with poisoned embeddings as source and clean
+embeddings as target~\cite{sun2016coral}, in a reduced-rank and a regularized
+form respectively.
 
-\textit{CORAL-PCA and CORAL-ridge.} Covariance alignment treating poisoned
-embeddings as source and clean embeddings as target, in a reduced-rank and a
-regularized form respectively.
+\textit{Feature-space oracle.} The ML-FilterRAG proxy's four features are
+interpolated toward clean targets, from a nearest-clean bijection to the global
+clean centroid, putting the same locality question to a learned rule.
 
 These are not text-space attacks and not learned domain-adaptation models; they
 are formal embedding-space stress tests of a similarity-based decision rule.
 % This sentence is deliberately retained near-verbatim from the notes file: it is
 % the interpretation rule the rest of the paper leans on.
+For RAGDefender, the oracle analysis is scoped to the evaluated configuration;
+paper-faithful reruns may re-attribute the dominant failure mechanism.
 
-\subsection{GPT Targeted Mutation Families}
+\subsection{Targeted Text Mutation Families}
 \label{subsec:families_mut}
-Three hand-authored GPT rewrite families, one per targeted assumption. Each
-family rewrites all $\Npoison$ poisoned passages of a query while preserving the
-attacker's target answer.
+Three hand-authored GPT rewrite families, one per targeted assumption, each
+rewriting all $\Npoison$ poisoned passages of a query while preserving the
+attacker's target wrong answer. The mutation families are stress-test operators
+designed to probe defense assumptions.
 
-\textit{RAGDefender-targeted discourse-diverse rewrites.} Objective: reduce
-cross-passage similarity concentration so the poison set stops being the densest
-subgraph.
+\textit{RAGDefender-targeted.} Diversify the discourse frame of each passage and
+reduce poison-poison semantic similarity, so the poison set stops being the
+densest high-similarity subgraph and the pairwise clustering signal weakens.
 
-\textit{FilterRAG-targeted low-overlap rewrites.} Objective: preserve the false
-claim while lowering query and answer keyword overlap and raising unique-word
-count.
+\textit{FilterRAG-targeted.} Reduce lexical and semantic overlap with the query
+and candidate-answer terms while preserving support for the same target wrong
+answer, and raise unique-word count, so the frequency-density statistic falls.
 
-\textit{ML-FilterRAG clean-reference rewrites.} Objective: move the learned
-feature vector toward the clean feature distribution using clean passages as
-stylistic references.
+\textit{ML-FilterRAG-targeted.} Make the passages read as ordinary clean
+reference text, using clean retrieved passages as stylistic references, so the
+learned feature profile shifts toward the clean distribution.
 
-\TODO{State that these rewrites are hand-authored via fixed GPT prompt packets on
-$\NdevQ$ development-set queries, that the prompts are hashed and committed, and
-that prompt design is therefore a development-set artifact --- which is precisely
-why the confirmation set of Sec.~\ref{subsec:confirmation} is held out.}
+Rewrites are authored through fixed GPT prompt packets, one per family, so prompt
+design is itself a development-set artifact. The current $\NdevQ$-query mutation
+bundle is a development set used for prompt design and failure-mode discovery; a
+larger held-out confirmation set is planned before final claims
+(Sec.~\ref{subsec:confirmation}).
 
-\subsection{Fixed-Context Evaluation}
+\subsection{Fixed-Context and Full-Retrieval Evaluation}
 \label{subsec:fixedctx}
-\TODO{Retrieved top-$k$ membership and order reconstructed verbatim from the
-pilot artifacts; only the $\Npoison$ poisoned passages' text differs per family;
-clean passages byte-identical across all conditions. Report per-defense change in
-removed poison and in residual poison fraction.}
-
-\subsection{Full-Retrieval Replacement}
 \label{subsec:fullret}
-\TODO{Mutated passages substituted into the corpus, retrieval rerun, replacement
-only, budget preserved. Report how many self-query poisoned passages return to
-the top-$k$, their rank range, and any cross-query poison retrieved.}
+Under fixed context the retrieved top-$\Ktop$ membership and order are
+reconstructed verbatim from the pilot artifacts and only the $\Npoison$ poisoned
+passages' text differs between conditions, clean retrieved passages being
+byte-identical across every condition of a case. Holding the retriever out
+isolates a defense's sensitivity to passage content from any change in what
+retrieval returns. We report removed poison, removed clean, the residual poison
+fraction, and the defense-specific diagnostic score each rule computes
+(Sec.~\ref{sec:setup}). Fixed-context success does not imply a practical corpus
+attack because retrieval is bypassed.
+
+Full-retrieval replacement closes that gap: mutated passages \emph{replace} the
+original poisoned documents in the adversarial corpus and retrieval is rerun at
+top-$k=\Ktop$, so the regime tests the PoisonedRAG retrieval
+condition~\cite{zou2025poisonedrag} instead of assuming it. Full-retrieval
+replacement preserves the self-query poison budget: original and mutated poisoned
+passages are never included together for the same target query. Per case we track self-query poison retrieved, cross-query poison
+retrieved, clean passages retrieved, and each defense's removal outcome.
 
 \subsection{Answer Generation and RobustRAG-KW Evaluation}
 \label{subsec:answergen}
-\TODO{Post-defense contexts passed to the generator; strict token-boundary
-matching for ASR; abstention detected by the same detector RobustRAG-KW uses, so
-that a refusal and a correct answer are never merged into one outcome. Cases are
-\emph{shortlisted} for filter stress, so counts are reported, never rates.}
-\NOOVERCLAIM{shortlist only}
+Answer generation is run on shortlisted cases with no defense and after each
+passage-filtering defense, so a defense's effect on the produced answer is
+observed rather than inferred from removal counts. Strict ASR is a token-boundary
+match of the attacker's target wrong answer in the generated text, and
+abstentions are detected by the same detector RobustRAG-KW uses, so a refusal and
+a correct answer are never merged into one outcome. Strict matching over-counts
+on yes/no and contrastive answers, a limitation stated with the reporting
+conventions of Sec.~\ref{sec:setup} and revisited in Sec.~\ref{sec:limitations}.
 
-\subsection{Confirmation-Set Protocol}
+RobustRAG-KW runs in the same regime but reads a different signal: it isolates
+each retrieved passage into its own generator call, extracts and normalizes a
+short answer from each, aggregates the isolated answers by keyword vote, and
+abstains when the vote is contested~\cite{xiang2024robustrag}. RobustRAG-KW is
+evaluated as a generation-time aggregation proxy; it is not treated as a passage
+filter and is not compared as a certified RobustRAG implementation, so it
+contributes a mechanistically distinct generation-time profile rather than a
+stronger one. Because each case costs one generator call per retrieved passage
+plus an aggregation step, it is evaluated only on \emph{shortlisted} cases and
+its outcomes are reported as counts, never rates. \NOOVERCLAIM{shortlist only}
+
+\subsection{Confirmation-Set and Toolkit Protocols}
 \label{subsec:confirmation}
 \PENDING{larger GPT confirmation set}
-The current $\NdevQ$-query targeted mutation work is treated as the
-development/prompt-design set. The planned confirmation set is $\NconfQ$ held-out
-HotpotQA queries at $k=\Ktop$ and $N=\Npoison$, with 3 mutation families
-$\times$ 2 bundles $\times$ $\Npoison$ passages, i.e. $\NconfPassages$ mutated
-passages. Query identifiers are fixed in advance and disjoint from the
-development set.
-\TODO{Once the confirmation set exists, the development-set numbers in
-Sec.~\ref{subsec:rq3} become prompt-design evidence and the confirmation-set
-numbers become the reported result. The prose in Sec.~\ref{subsec:rq3} is written
-to make that substitution without restructuring.}
+The targeted mutation bundle above is development-scale evidence. The planned
+confirmation set is $\NconfQ$ held-out HotpotQA queries at $k=\Ktop$ and
+$N=\Npoison$, with 3 mutation families $\times$ 2 bundles $\times$ $\Npoison$
+passages, i.e. $\NconfPassages$ mutated passages; identifiers are fixed in
+advance and disjoint from the development set, and the prompt packets are frozen
+before any confirmation-set case is evaluated. The prose of
+Sec.~\ref{subsec:rq3} is written so that confirmation-set numbers substitute for
+development-set numbers without restructuring, the development-set numbers
+becoming prompt-design evidence.
 
 % Table VIII (tab:confirmation_set_pending) is deliberately left as a commented
 % TODO rather than a live float: at skeleton stage it would carry no columns of
@@ -643,13 +686,14 @@ to make that substitution without restructuring.}
 % Columns: query id | family | bundle | passages mutated | retrieval survival | per-defense removed poison
 % \end{table}
 
-\subsection{Toolkit Mutation Ablation Protocol}
-\label{subsec:toolkit}
 \PENDING{toolkit ablation}
-Planned as an ablation, after the confirmation set, asking whether generic
-library perturbations reproduce the failures produced by targeted GPT rewrites.
-The question is deliberately narrow: it is a control on the \emph{specificity} of
-the targeted families, not a search for a stronger attack.
+\label{subsec:toolkit}
+The toolkit mutation ablation follows the confirmation set and asks one narrow
+question: whether generic library
+perturbations~\cite{jin2020textfooler,li2020bertattack,morris2020textattack}
+under a matched budget reproduce the per-defense effects of the defense-aware GPT
+rewrites. It is a control on the \emph{specificity} of the targeted families, not
+a search for a stronger attack.
 \TODO{Fix the toolkit, the constraint set, and the matched budget before running,
 so the comparison is a controlled substitution of the rewrite operator only.}
 
@@ -662,19 +706,18 @@ so the comparison is a controlled substitution of the rewrite operator only.}
 
 \subsection{Reproducibility Controls}
 \label{subsec:repro}
-\begin{itemize}
-  \item Cached retrieval and cached defense scoring, so a rerun reproduces prior
-        numbers exactly rather than approximately.
-  \item Hashed and committed GPT prompt packets for every mutation family.
-  \item Replacement-only poison budget: $N=\Npoison$ preserved in every mutated
-        condition; no original-plus-mutated duplication.
-  \item Held-out query identifiers fixed in advance for the confirmation set.
-  \item No API calls in the test suite; every evaluation script consumes
-        committed artifacts and loads models read-only.
-  \item Self-query versus cross-query poison accounted separately, so a case that
-        retrieves poison authored for a different pool query is never counted as
-        if all retrieved poison targeted the case at hand.
-\end{itemize}
+Retrieval and defense scoring are cached, so a rerun reproduces prior numbers
+exactly rather than approximately, and answer generation is cached by
+(model, prompt) hash so that RobustRAG-KW aggregation and the reports derived
+from it can be regenerated from cached answers without new generator calls.
+GPT prompt packets are hashed and committed per mutation family; confirmation-set
+query identifiers are fixed in advance and held out; the poison budget is
+replacement-only, preserved at $N=\Npoison$ in every mutated condition with no
+original-plus-mutated duplication; and self-query versus cross-query poison is
+accounted separately, so a case that retrieves poison authored for a different
+pool query is never counted as if all retrieved poison targeted the case at hand.
+Every evaluation script consumes committed artifacts and loads models read-only,
+and the test suite makes no API calls.
 
 % --- Figure 1 ------------------------------------------------------------------
 \begin{figure}[!t]
